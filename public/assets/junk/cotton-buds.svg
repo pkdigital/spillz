@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <g fill="#ffffff" stroke="#1f2530" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round">
+    <!-- shaft (double-edged stick between the two cotton tips) -->
+    <path d="M23.7,37.1 L38.1,24.3 L40.3,26.9 L25.9,39.7 Z"/>
+    <!-- bottom-left cotton tip (teardrop, point toward shaft) -->
+    <path d="M13,0 C5,-7 -7,-7 -7,0 C-7,7 5,7 13,0 Z" transform="translate(15,47) rotate(-41)"/>
+    <!-- top-right cotton tip -->
+    <path d="M13,0 C5,-7 -7,-7 -7,0 C-7,7 5,7 13,0 Z" transform="translate(49,17) rotate(139)"/>
+  </g>
+</svg>

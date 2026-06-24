@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>Flowz</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+    <style>
+      /* Nudge the browser to fetch the arcade font up-front. */
+      .arcade-preload {
+        font-family: "Press Start 2P", monospace;
+        position: absolute;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #0b1020;
+        overflow: hidden;
+        /* Stop iOS/Android touch gestures (scroll, pinch, double-tap-zoom) from
+           hijacking taps on the grid. */
+        touch-action: none;
+        overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #game {
+        width: 100vw;
+        height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="game"></div>
+    <span class="arcade-preload">.</span>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

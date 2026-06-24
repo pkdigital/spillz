@@ -1,0 +1,63 @@
+// ---- Difficulty curve (all progression knobs live here) --------------------
+//
+// A "level" is now a run from the toilet (top) to the treatment works (bottom).
+// `level` is the 1-based run number; reaching the terminal advances it.
+
+/**
+ * Length of the guaranteed-connectable opening backbone. The first ~20 placeable
+ * pieces form a real on-grid path from the source, so the player has a fair,
+ * winnable start (the early-hook). See `queue.ts`.
+ */
+export const OPENING_PATH_LEN = 20;
+
+/** Length of each connectable continuation chunk after the opening. */
+export const CHUNK_PATH_LEN = 12;
+
+/** Grid row of the treatment works for a level — deeper each level. */
+export const TERMINAL_BASE_ROW = 11;
+export const TERMINAL_ROW_STEP = 3;
+export function terminalRow(level: number): number {
+  return TERMINAL_BASE_ROW + (level - 1) * TERMINAL_ROW_STEP;
+}
+
+/** First row that can hold a clog obstacle (keeps the opening clean). */
+export const OBSTACLE_START_ROW = 3;
+
+/**
+ * Per-cell chance a clog (unflushable) obstacle is seeded on a grid row. The
+ * unflushables sit ON the grid as hazards to route around (NOT in the queue);
+ * they get denser the deeper you dig.
+ */
+export function obstacleChance(row: number): number {
+  return Math.min(0.06 + row * 0.004, 0.18);
+}
+
+/** Per-cell chance a power-up tile is seeded on a grid row (also board features). */
+export const POWER_CELL_CHANCE = 0.05;
+
+/**
+ * Bonus four-way cross tiles per chunk. None in the early levels (it's a powerful,
+ * confusing piece for new players); it shows up from level 3 on.
+ */
+export function crossesForLevel(level: number): number {
+  return level >= 3 ? 1 : 0;
+}
+
+/**
+ * Bonus three-way T-junction tiles per chunk. None early (the extra mouth leaks
+ * if you can't connect all three — too hard for new players); from level 3 on it
+ * ramps 1, 2, 3 (capped).
+ */
+export function teesForLevel(level: number): number {
+  return level < 3 ? 0 : Math.min(1 + Math.floor((level - 3) / 2), 3);
+}
+
+/** How many fish live in this level's pond — the run score is the total saved. */
+export function fishForLevel(level: number): number {
+  return Math.min(3 + level, 12); // 4 at level 1, growing, capped
+}
+
+/** Distinct fish species on show this level (variety grows as you go deeper). */
+export function fishSpeciesForLevel(level: number): number {
+  return Math.min(2 + level, 6);
+}
