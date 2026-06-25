@@ -230,7 +230,7 @@ export class GameScene extends Phaser.Scene {
   private confetti: Confetti[] = [];
   private prevState: GameState = "COUNTDOWN";
   /** Pending (re)start — deferred out of the input callback to the next tick. */
-  private pendingRestart: { level: number; fishSaved: number; runScore: number } | null = null;
+  private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[] } | null = null;
   /** Smoothed X of the next-pipe box — slides right when the action is behind it. */
   private boxX = 0;
   /** Active dynamite blasts (world row/col so they scroll with the grid). */
@@ -257,6 +257,15 @@ export class GameScene extends Phaser.Scene {
   /** Current on-screen "Oh No. Condom!"-style toast. */
   private toast: { label: string; icon: string; start: number } | null = null;
   private toastText!: Phaser.GameObjects.Text;
+
+  /** Llamatron-style instruction banners ("REMOVE THE FATBERG WITH THE DYNAMITE!") that flash
+   *  at key moments. A small queue so several can play back-to-back. */
+  private banner: { lines: string[]; start: number; hold: number } | null = null;
+  private bannerQueue: { lines: string[]; hold: number }[] = [];
+  private bannerText!: Phaser.GameObjects.Text;
+  /** One-time hints already shown THIS RUN (survives level restarts via the scene data). */
+  private seenHints = new Set<string>();
+  private prevStarted = false;
 
   /** Pooled sprite images, re-used each frame. */
   private sprites: Phaser.GameObjects.Image[] = [];
@@ -294,8 +303,12 @@ export class GameScene extends Phaser.Scene {
     this.load.image("decor-toilet", "assets/decor/toilet.png"); // drop your PNG to override
   }
 
-  create(data?: { level?: number; fishSaved?: number; runScore?: number }): void {
+  create(data?: { level?: number; fishSaved?: number; runScore?: number; seenHints?: string[] }): void {
     this.model = new Game(undefined, data?.level ?? 1, data?.fishSaved ?? 0, data?.runScore ?? 0);
+    this.seenHints = new Set(data?.seenHints ?? []);
+    this.banner = null;
+    this.bannerQueue = [];
+    this.prevStarted = false;
     this.scrollPx = 0;
     this.scrollTargetPx = 0;
     this.clock = 0;
@@ -363,6 +376,19 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0.5)
       .setDepth(Z_TEXT)
       .setVisible(false);
+    this.bannerText = this.add
+      .text(GAME_WIDTH / 2, 0, "", {
+        fontFamily: ARCADE_FONT,
+        fontSize: "22px",
+        color: "#ffd24a",
+        align: "center",
+        lineSpacing: 10,
+        stroke: "#06101a",
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setDepth(Z_TEXT)
+      .setVisible(false);
     this.buttonText = this.add
       .text(0, 0, "", { fontFamily: ARCADE_FONT, fontSize: "14px", color: "#12100e" })
       .setOrigin(0.5)
@@ -374,7 +400,12 @@ export class GameScene extends Phaser.Scene {
     this.input.on("pointerup", this.onUp, this);
     // dev shortcuts: N = skip to next level (reach the fatberg on L3+); D = kill a fish
     this.input.keyboard?.on("keydown-N", () => {
-      this.pendingRestart = { level: this.model.level + 1, fishSaved: this.model.fishSaved, runScore: this.model.runScore };
+      this.pendingRestart = {
+        level: this.model.level + 1,
+        fishSaved: this.model.fishSaved,
+        runScore: this.model.runScore,
+        seenHints: [...this.seenHints],
+      };
     });
     this.input.keyboard?.on("keydown-D", () => this.model.killFish());
   }
@@ -453,7 +484,9 @@ export class GameScene extends Phaser.Scene {
       const b = this.endButton; // only the dialog button advances
       if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
         const level = this.model.state === "WON" ? this.model.level + 1 : this.model.level;
-        this.pendingRestart = { level, fishSaved: this.model.fishSaved, runScore: this.model.runScore };
+        // a WON advance keeps the seen hints; a GAMEOVER ends the run, so start hints fresh
+        const seenHints = this.model.state === "WON" ? [...this.seenHints] : [];
+        this.pendingRestart = { level, fishSaved: this.model.fishSaved, runScore: this.model.runScore, seenHints };
       }
       return;
     }
@@ -532,6 +565,20 @@ export class GameScene extends Phaser.Scene {
     for (const e of this.model.consumeEvents()) {
       if (e.kind === "clog") this.spawnJunkDrop(e);
       else if (e.kind === "explosion") this.explosions.push({ ...e.coord, start: this.clock });
+    }
+
+    // Llamatron-style instruction banners
+    if (this.model.started && !this.prevStarted) {
+      this.queueBanner([`LEVEL ${this.model.level}`], 1900); // level-start flash
+    }
+    this.prevStarted = this.model.started;
+    // first fatberg of the run — flashed once it scrolls into view
+    if (!this.seenHints.has("fatberg") && this.model.fatbergAt) {
+      const fy = this.rowScreenY(this.model.fatbergAt.row);
+      if (fy <= this.pondTop && fy >= HUD_H - CELL * 2) {
+        this.seenHints.add("fatberg");
+        this.queueBanner(["REMOVE THE FATBERG", "WITH THE DYNAMITE!"], 3200);
+      }
     }
 
     this.render();
@@ -795,6 +842,7 @@ export class GameScene extends Phaser.Scene {
     this.renderJunkDrops();
     this.renderConfetti(u);
     this.renderToast(u);
+    this.renderBanner(); // big instruction flash (hidden behind the end/start cards)
     this.renderEndDialog(u); // modal card, drawn on top of everything
     this.renderStartOverlay(u); // pre-run Start screen (mutually exclusive with the end card)
 
@@ -1521,6 +1569,36 @@ export class GameScene extends Phaser.Scene {
     rim(0.7, light, 0, b1);
     rim(0.3, light, b1, b2);
     rim(0.5, dark, t - b1, b1);
+  }
+
+  private queueBanner(lines: string[], hold: number): void {
+    this.bannerQueue.push({ lines, hold });
+  }
+
+  /** Big arcade instruction flash (Llamatron-style): pops in, holds, fades; queued so several
+   *  can play in turn. Hidden while a Start/Win/Lose card is up. */
+  private renderBanner(): void {
+    const playing = this.model.started && this.model.state !== "WON" && this.model.state !== "GAMEOVER";
+    if (!this.banner && this.bannerQueue.length && playing) {
+      this.banner = { ...this.bannerQueue.shift()!, start: this.clock };
+    }
+    const age = this.banner ? this.clock - this.banner.start : 0;
+    if (!this.banner || !playing || age > this.banner.hold) {
+      this.banner = null;
+      this.bannerText.setVisible(false);
+      return;
+    }
+    const fadeIn = Math.min(1, age / 180);
+    const fadeOut = Math.min(1, Math.max(0, (this.banner.hold - age) / 450));
+    const alpha = Math.min(fadeIn, fadeOut);
+    const pop = age < 300 ? easeOutBack(Math.min(1, age / 300)) : 1;
+    const cy = HUD_H + (this.pondTop - HUD_H) * 0.3;
+    this.bannerText
+      .setText(this.banner.lines.join("\n"))
+      .setPosition(GAME_WIDTH / 2, cy)
+      .setScale(pop)
+      .setAlpha(alpha)
+      .setVisible(true);
   }
 
   /** "Oh No. Condom!"-style banner that pops, holds, and fades when sewage hits a special tile. */

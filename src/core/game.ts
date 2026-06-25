@@ -541,6 +541,12 @@ export class Game {
     return this.leakTargets[0] ?? null;
   }
 
+  /** The fatberg boss's 2x2 anchor cell, once one has been seeded this level (else null).
+   *  The scene uses this to flash a one-time "use the dynamite" hint when it comes into view. */
+  get fatbergAt(): Coord | null {
+    return this.fatbergAnchor;
+  }
+
   /**
    * The build frontier: every empty, in-bounds cell that an OPEN end of the
    * source-connected pipe network points into — i.e. where the next piece should
