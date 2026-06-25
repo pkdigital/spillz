@@ -206,6 +206,7 @@ const FISH_COLORS = [0x9be15d, 0xffb347, 0x6fd3ff, 0xff8da3, 0xc792ea, 0xf6e05e]
 
 const PLACE_ANIM_MS = 170;
 const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
+const WIN_DRAIN_MS = 1500; // on a win, the pipes drain out before the results card shows
 const FACTS: { fact: string; source: string }[] = factsData.facts;
 // SFX names: a real sample at assets/sfx/<name>.mp3 plays in preference to the synth fallback.
 const SFX_NAMES = ["place", "flow", "leak", "cap", "tick", "win", "lose", "splosh", "junk", "score", "freeze", "poison", "rain", "blitz", "speedup"] as const;
@@ -310,6 +311,7 @@ export class GameScene extends Phaser.Scene {
   private lastSploshAt = 0; // throttle the river-splash sound
   private flashUntil = -1; // full-screen colour flash (surge / win)
   private flashColor = 0xffffff;
+  private winDrainStart = -1; // clock when the win-drain began (pipes empty out)
 
   /** Pooled sprite images, re-used each frame. */
   private sprites: Phaser.GameObjects.Image[] = [];
@@ -389,6 +391,7 @@ export class GameScene extends Phaser.Scene {
     this.lastTickAt = 0;
     this.lastSploshAt = 0;
     this.flashUntil = -1;
+    this.winDrainStart = -1;
     this.endButton = null;
     this.startButton = null;
     this.tallyStart = 0;
@@ -718,19 +721,26 @@ export class GameScene extends Phaser.Scene {
     // Advance the flow-texture phase at exactly the speed the sewage front moves (one CELL
     // per ring). Accumulated (not clock×rate) so a rate change — superflow, speed powers —
     // changes future drift without teleporting every speck.
-    if (!this.model.frozen) this.flowPhase += deltaMs * (CELL / Math.max(1, this.model.ringFlowMs));
+    let flowRate = CELL / Math.max(1, this.model.ringFlowMs);
+    if (this.model.state === "WON" && this.winDrainStart >= 0) {
+      // contained! the held sewage eases to a stop instead of freezing dead (it's NOT drained)
+      flowRate *= Math.max(0, 1 - (this.clock - this.winDrainStart) / WIN_DRAIN_MS);
+    }
+    if (!this.model.frozen) this.flowPhase += deltaMs * flowRate;
     // Hold the countdown while the board is still revealing (obstacles reeling in). The reveal is
     // a pure scene animation; the game proper only begins once every tile has settled.
     const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
     this.model.update(revealing ? 0 : deltaMs);
 
-    // level cleared: burst confetti, fanfare, green flash, then wait for a tap to move on
+    // level cleared: confetti, fanfare, green flash. The pipes then DRAIN (the dump's over) for
+    // WIN_DRAIN_MS before the results card shows — the count-up starts when the card appears.
     if (this.model.state === "WON" && this.prevState !== "WON") {
       this.spawnConfetti();
       this.sfxWin();
       this.flashUntil = this.clock + 450;
       this.flashColor = 0x9be15d;
-      this.tallyStart = this.clock; // begin the level-clear count-up
+      this.winDrainStart = this.clock;
+      this.tallyStart = this.clock + WIN_DRAIN_MS; // tally begins as the card appears
       this.tallyFishCounted = 0;
       this.tallyBonusBleepAt = 0;
       this.tallyDoneBleeped = false;
@@ -1049,6 +1059,8 @@ export class GameScene extends Phaser.Scene {
 
     const ringStart = this.model.ringStart;
     const progress = this.model.fillProgress;
+    // On a win the sewage stays CONTAINED in the pipes (diverted from the river) — it doesn't
+    // drain anywhere. The flow just eases to a stop (see the flowPhase decel in update()).
     for (const seg of this.model.filled) {
       if (seg.coord.row < topRow || seg.coord.row > botRow) continue;
       const cell = this.model.grid.get(seg.coord);
@@ -2429,7 +2441,9 @@ export class GameScene extends Phaser.Scene {
   /** Modal end-of-level card with the fish tally and a single button to continue. */
   private renderEndDialog(g: G): void {
     const m = this.model;
-    if (m.state !== "WON" && m.state !== "GAMEOVER") {
+    // hold the card back while the pipes drain on a win (the count-up starts as it appears)
+    const draining = m.state === "WON" && this.clock - this.winDrainStart < WIN_DRAIN_MS;
+    if ((m.state !== "WON" && m.state !== "GAMEOVER") || draining) {
       this.endButton = null;
       this.buttonText.setVisible(false);
       return;
