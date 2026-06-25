@@ -439,10 +439,21 @@ export class Game {
       this.adjustBalance(-CONFIG.overwriteHit);
     }
 
-    // Completing the route to the works takes effect NOW: pull the next flow tick
-    // forward so the super-speed dash starts immediately (no waiting a slow tick).
-    if (this.state === "FLOWING" && this.isConnectedToTerminal()) {
-      this.nextFlowAt = Math.min(this.nextFlowAt, this.elapsed);
+    // A placement that changes the flow takes effect NOW — pull the next tick forward so the
+    // flood re-evaluates this frame instead of after a slow tick. Two cases:
+    //  - completing the route to the works (start the super-speed dash immediately), and
+    //  - capping / replacing a leaking end (so the spill stops the instant the player plugs it,
+    //    rather than gushing for up to a full tick afterwards).
+    if (this.state === "FLOWING") {
+      const capsLeak =
+        this.leaking &&
+        this.leaks.some((l) => {
+          const t = step(l.from, l.out);
+          return (t.row === c.row && t.col === c.col) || (l.from.row === c.row && l.from.col === c.col);
+        });
+      if (this.isConnectedToTerminal() || capsLeak) {
+        this.nextFlowAt = Math.min(this.nextFlowAt, this.elapsed);
+      }
     }
     return true;
   }
@@ -505,6 +516,22 @@ export class Game {
       if (seen.has(k)) continue;
       seen.add(k);
       out.push(l.from);
+    }
+    return out;
+  }
+
+  /** For the leak UI: each buildable leak as the empty cell to build into plus the
+   *  direction the sewage is spilling, so the renderer can march an arrow that way. */
+  get leakHints(): { cell: Coord; dir: Side }[] {
+    const out: { cell: Coord; dir: Side }[] = [];
+    const seen = new Set<string>();
+    for (const l of this.leaks) {
+      const t = step(l.from, l.out);
+      if (!this.grid.isEmpty(t)) continue; // only buildable (empty) targets get an arrow
+      const k = keyOf(t);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ cell: t, dir: l.out });
     }
     return out;
   }

@@ -21,10 +21,22 @@ const COLS = 7;
 const SOURCE: Coord = { row: 0, col: 3 };
 
 describe("goal-directed queue (the early-level assist)", () => {
-  it("at full directness, heads straight down the source column toward the works", () => {
-    // target straight below the source -> a greedy walk just goes down = all straight-v
-    const path = connectablePath(ROWS, COLS, SOURCE, 5, mulberry32(7), { row: 30, col: 3 }, 1);
-    expect(path).toEqual(["straight-v", "straight-v", "straight-v", "straight-v", "straight-v"]);
+  it("at full directness, descends toward the works but bends (no endless straight run)", () => {
+    // target straight below the source: the walk heads down, but the anti-streak rule forces
+    // a bend every few steps, so it's NOT one long straight-v column (that made levels trivial).
+    const steps = planPath(ROWS, COLS, SOURCE, 12, mulberry32(7), { row: 30, col: 3 }, 1);
+    expect(steps.length).toBe(12);
+    const straights = steps.filter((s) => s.piece === "straight-v").length;
+    expect(straights).toBeGreaterThan(0); // still mostly heading down
+    expect(straights).toBeLessThan(steps.length); // but not a pure straight column
+    // never more than 3 straight-Vs in a row
+    let run = 0;
+    let maxRun = 0;
+    for (const s of steps) {
+      run = s.piece === "straight-v" ? run + 1 : 0;
+      maxRun = Math.max(maxRun, run);
+    }
+    expect(maxRun).toBeLessThanOrEqual(3);
   });
 
   it("the assist never walks back up (no piece is entered from below)", () => {

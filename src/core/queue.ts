@@ -53,12 +53,22 @@ function orderExits(
   target: Coord,
   directness: number,
   rng: () => number,
+  prevExit: Side | null,
+  runLen: number,
+  cols: number,
 ): Side[] {
   return sides
     .map((s) => {
       const nx = step(cell, s);
       const dist = Math.abs(nx.row - target.row) + Math.abs(nx.col - target.col);
-      const score = -dist + (rng() - 0.5) * (1 - directness) * 26; // jitter shrinks as directness rises
+      // anti-streak: penalise continuing the SAME direction, growing with the run length, so a
+      // greedy descent can't become an endless straight line (e.g. 9 straight-Vs onto the works).
+      // It still mostly heads at the target, but is forced to bend every few steps -> real variety.
+      const streak = prevExit !== null && s === prevExit ? Math.max(0, runLen - 1) * 7 : 0;
+      // edge bias: steer away from the side walls so the path turns back BEFORE it hugs an edge
+      // (keeps room to manoeuvre and means the next piece handed over is a bend, not a wall-hug).
+      const edge = nx.col === 0 || nx.col === cols - 1 ? 9 : nx.col === 1 || nx.col === cols - 2 ? 3 : 0;
+      const score = -dist + (rng() - 0.5) * (1 - directness) * 26 - streak - edge;
       return { s, score };
     })
     .sort((a, b) => b.score - a.score)
@@ -86,18 +96,21 @@ export function planPath(
   const visited = new Set<string>([keyOf(source)]);
   const steps: PathStep[] = [];
 
-  const dfs = (cell: Coord, entry: Side, remaining: number): boolean => {
+  const dfs = (cell: Coord, entry: Side, remaining: number, prevExit: Side | null, runLen: number): boolean => {
     visited.add(keyOf(cell));
     // the assist (target set) never walks back UP — every piece moves toward the works,
     // so the player is only ever handed forward-progress pieces (no useless snake-back).
     const open = ALL_SIDES.filter((s) => s !== entry && !(target && s === Side.N));
-    const ordered = target ? orderExits(open, cell, target, directness, rng) : shuffled(open, rng);
+    const ordered = target
+      ? orderExits(open, cell, target, directness, rng, prevExit, runLen, cols)
+      : shuffled(open, rng);
     for (const exit of ordered) {
       const next = step(cell, exit);
       if (!inBounds(next) || visited.has(keyOf(next))) continue; // exit must lead somewhere real
       steps.push({ cell, entry, exit, piece: pieceFor(entry, exit) });
       if (remaining === 1) return true; // emitted enough; `next` is the open end
-      if (dfs(next, opposite(exit), remaining - 1)) return true;
+      const nextRun = exit === prevExit ? runLen + 1 : 1;
+      if (dfs(next, opposite(exit), remaining - 1, exit, nextRun)) return true;
       steps.pop();
     }
     visited.delete(keyOf(cell));
@@ -105,7 +118,7 @@ export function planPath(
   };
 
   const first = step(source, Side.S); // source flows down; first cell is below it
-  if (length > 0 && inBounds(first)) dfs(first, Side.N, length);
+  if (length > 0 && inBounds(first)) dfs(first, Side.N, length, null, 0);
   return steps;
 }
 

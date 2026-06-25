@@ -201,12 +201,6 @@ export class GameScene extends Phaser.Scene {
   private model!: Game;
   private gfxWorld!: G;
   private gfxUi!: G;
-  /** Leading (filling) tile drawn as the FULL settled poo shape, revealed by a growing
-   *  geometry mask — an animated wipe of the real shape, so the elbow is always correctly
-   *  rounded and can never show a notch or overshoot (the shape itself bounds the poo). */
-  private gfxFront!: G;
-  private frontMaskG!: G;
-  private frontMask!: Phaser.Display.Masks.GeometryMask;
   /** Dedicated, masked layer for the next-piece reel so symbols clip at the box rim.
    *  The mask is applied ONLY while spinning — a persistent mask does a per-frame
    *  stencil pass even when idle, which is slow on software WebGL. */
@@ -294,8 +288,9 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
     for (let i = 1; i <= 5; i++) {
       this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 96, height: 96 });
+      // a greyscale copy of the SAME species shape — a corpse should read as the same fish, drained
+      this.load.svg(`fish-${i}-dead`, `assets/decor/fish-${i}-dead.svg`, { width: 96, height: 96 });
     }
-    this.load.svg("fish-dead", "assets/decor/fish.svg", { width: 96, height: 96 }); // greyscale, for goners
     this.load.image("decor-toilet", "assets/decor/toilet.png"); // drop your PNG to override
   }
 
@@ -332,11 +327,6 @@ export class GameScene extends Phaser.Scene {
     this.labels = [];
 
     this.gfxWorld = this.add.graphics();
-    // Leading-tile layer sits just above the world poo, clipped by its own growing mask.
-    this.gfxFront = this.add.graphics().setDepth(1);
-    this.frontMaskG = this.add.graphics().setVisible(false);
-    this.frontMask = this.frontMaskG.createGeometryMask();
-    this.gfxFront.setMask(this.frontMask);
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
     this.reelGfx = this.add.graphics().setDepth(Z_UI);
     this.reelMaskG = this.add.graphics().setVisible(false);
@@ -655,14 +645,16 @@ export class GameScene extends Phaser.Scene {
         this.dripTimer -= DRIP_SPAWN_MS;
         for (const leak of this.model.leaks) {
           if (this.drips.length >= DRIP_MAX) break;
-          const x = leak.from.col * CELL + CELL / 2 + (Math.random() - 0.5) * CELL * 0.4;
-          const y = this.rowScreenY(leak.from.row) + CELL / 2;
-          if (y < HUD_H - CELL) continue; // leak off the top of the view
+          const [ux, uy] = GameScene.ARROW_VEC[leak.out];
+          // spawn at the pipe MOUTH (cell edge in the spill direction), not the cell centre
+          const mx = leak.from.col * CELL + CELL / 2 + ux * CELL * 0.5;
+          const my = this.rowScreenY(leak.from.row) + CELL / 2 + uy * CELL * 0.5;
+          if (my < HUD_H - CELL) continue; // leak off the top of the view
           this.drips.push({
-            x,
-            y,
-            vx: (Math.random() - 0.5) * 40,
-            vy: 20 + Math.random() * 40, // starts slow, gravity does the rest
+            x: mx + (Math.random() - 0.5) * CELL * 0.2,
+            y: my,
+            vx: ux * 70 + (Math.random() - 0.5) * 40, // shoots out the mouth, then gravity takes over
+            vy: uy * 50 + 20 + Math.random() * 40,
             r: 3 + Math.random() * 2.5,
           });
         }
@@ -724,9 +716,6 @@ export class GameScene extends Phaser.Scene {
   private render(): void {
     const w = this.gfxWorld;
     w.clear();
-    this.gfxFront.clear();
-    this.frontMaskG.clear();
-    this.frontMaskG.fillStyle(0xffffff, 1);
     this.spriteIdx = 0;
     this.labelIdx = 0;
 
@@ -786,16 +775,15 @@ export class GameScene extends Phaser.Scene {
       const cx = seg.coord.col * CELL + CELL / 2;
       const cy = this.rowScreenY(seg.coord.row) + CELL / 2;
       if (seg.at === ringStart && progress < 1) {
-        // leading tile: draw the FULL poo shape into the masked layer, and grow the mask
-        this.drawSewageFill(this.gfxFront, cx, cy, cell.openings, seg.coord);
-        this.growFrontMask(cx, cy, cell.openings, seg.entry, progress);
+        // leading tile: poo grows along the centre-line, nose-first (drawn directly, no mask)
+        this.drawSewageNose(w, cx, cy, cell.openings, seg.entry, progress, seg.coord);
       } else {
         this.drawSewageFill(w, cx, cy, cell.openings, seg.coord);
       }
     }
 
     this.drawLeak(w);
-    this.drawLeakTarget(w);
+    this.drawLeakArrows();
     this.renderExplosions(w);
 
     const u = this.gfxUi;
@@ -1200,11 +1188,14 @@ export class GameScene extends Phaser.Scene {
     const SPACING = CELL * 0.42;
     const r = t * 0.24; // speck radius
     const laneMax = t * 0.14; // perpendicular jitter — kept well inside the pipe wall (r+lane < t/2)
-    const fade = r * 2; // specks fade in/out within this distance of a channel end (kills the boundary pop)
     // MONOTONIC flow offset — no modulo. A speck's identity is its integer index k, so its
     // lane and colour never re-shuffle (the old `% SPACING` wrap re-indexed every speck each
     // cycle, which read as the whole stream "resetting" and jumping toward the rim). The phase
     // accumulates at the real sewage speed, so the texture moves in lockstep with the front.
+    // No end-fade: each speck belongs to exactly one tile and spills its radius into the neighbour
+    // (hidden by the neighbour's poo), so the stream stays continuous across a seam. Fading at the
+    // seam instead DIMMED every speck as it crossed — a per-tile-boundary stutter. The leading
+    // tile's front is clipped by the reveal mask, not by a fade, so nothing pops there either.
     const flow = this.flowPhase;
     const wLo = vertical ? lo - HUD_H + this.scrollPx : lo; // vertical scrolls with the camera; horizontal doesn't
     const wHi = vertical ? hi - HUD_H + this.scrollPx : hi;
@@ -1213,137 +1204,143 @@ export class GameScene extends Phaser.Scene {
     for (let k = kStart; k <= kEnd; k++) {
       const world = k * SPACING + flow;
       const pos = vertical ? world - this.scrollPx + HUD_H : world;
-      const edge = Math.min(pos - lo, hi - pos); // distance to nearest channel end (screen space)
-      if (edge <= 0) continue;
-      const a = 0.5 * Math.min(1, edge / fade); // fade so nothing pops in/out at the clip boundary
       const lane = ((((k % 3) + 3) % 3) - 1) * laneMax;
-      g.fillStyle(k % 2 === 0 ? lite : dark, a);
+      g.fillStyle(k % 2 === 0 ? lite : dark, 0.5);
       if (vertical) g.fillCircle(fixed + lane, pos, r);
       else g.fillCircle(pos, fixed + lane, r);
     }
   }
 
-  /** Grow the reveal mask for the leading tile (Bootstrap-progress-bar style): the fill amount
-   *  is a single scalar — arc-length swept along the pipe's centre-PATH — not a pair of arm
-   *  rectangles. We sweep a fat round-capped stroke (overlapping circles) entry-edge -> hub ->
-   *  exit up to that arc-length. Centred + round-joined, it fills a bend's elbow symmetrically
-   *  and can never bulge sideways into the perpendicular arm (the old rect notch). The full poo
-   *  shape underneath bounds the visible poo, so the stroke can't overshoot the pipe. */
-  private growFrontMask(cx: number, cy: number, openings: number, entry: Side | null, p: number): void {
-    const m = this.frontMaskG;
+  /** The leading (filling) tile's poo, drawn DIRECTLY (no geometry mask — which didn't reliably
+   *  clip on software WebGL, leaving the whole tile showing as a hard edge that just sat there a
+   *  whole slow tick). The poo is a fat round-capped stroke swept along the pipe's centre-PATH
+   *  (entry edge -> hub -> exit) up to arc-length CELL*p. Centred + round-joined, it fills a
+   *  bend's elbow symmetrically, rounds the advancing nose, and grows smoothly with p. */
+  private drawSewageNose(
+    g: G,
+    cx: number,
+    cy: number,
+    openings: number,
+    entry: Side | null,
+    p: number,
+    coord: { row: number; col: number },
+  ): void {
     const half = CELL / 2;
-    const R = CELL * 0.14; // stroke radius: a hair over the poo half-width (0.11) so edges aren't clipped
-    const STEP = CELL * 0.05; // circle spacing (heavy overlap -> a clean fat line)
+    const t = CELL * 0.22; // match a settled tile's poo width
+    const seed = hash3(coord.row, coord.col, 2);
+    const base = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.4 + seed * 0.25);
+    const R = t / 2; // stroke radius -> a t-wide round-capped line, same width as the settled poo
+    const STEP = CELL * 0.05; // heavy overlap -> a clean fat line
     const dir = (s: Side): [number, number] =>
       s === Side.N ? [0, -1] : s === Side.S ? [0, 1] : s === Side.W ? [-1, 0] : [1, 0];
     const stroke = (sx: number, sy: number, dx: number, dy: number, len: number): void => {
-      for (let s = 0; s < len; s += STEP) m.fillCircle(sx + dx * s, sy + dy * s, R);
-      m.fillCircle(sx + dx * len, sy + dy * len, R); // exact endpoint
+      for (let s = 0; s < len; s += STEP) g.fillCircle(sx + dx * s, sy + dy * s, R);
+      g.fillCircle(sx + dx * len, sy + dy * len, R); // exact endpoint (the round nose)
     };
+    g.fillStyle(base, 1);
     const exits = sidesOf(openings).filter((s) => s !== entry) as Side[];
+    let hubWet = entry === null;
     if (entry === null) {
-      // source: just the exits growing out of the hub
       for (const ex of exits) {
         const [dx, dy] = dir(ex);
         stroke(cx, cy, dx, dy, half * p);
       }
-      return;
-    }
-    const [ex, ey] = dir(entry); // hub -> entry edge
-    const d = CELL * p; // arc length from the entry edge (half in to the hub, half out to an exit)
-    stroke(cx + ex * half, cy + ey * half, -ex, -ey, Math.min(d, half)); // entry edge -> hub
-    if (d > half) {
-      const out = Math.min(d - half, half);
-      for (const exit of exits) {
-        const [dx, dy] = dir(exit);
-        stroke(cx, cy, dx, dy, out); // hub -> exit
+    } else {
+      const [ex, ey] = dir(entry); // hub -> entry edge
+      const d = CELL * p; // arc length from the entry edge (half in to the hub, half out to an exit)
+      stroke(cx + ex * half, cy + ey * half, -ex, -ey, Math.min(d, half)); // entry edge -> hub
+      if (d > half) {
+        hubWet = true;
+        const out = Math.min(d - half, half);
+        for (const exit of exits) {
+          const [dx, dy] = dir(exit);
+          stroke(cx, cy, dx, dy, out); // hub -> exit
+        }
       }
+    }
+    if (hubWet) {
+      g.fillStyle(shade(base, 0.72), 0.28); // textured core, matches a settled tile's hub
+      g.fillCircle(cx, cy, t * 0.34);
     }
   }
 
+  /** Sewage actually pouring OUT of a leaking pipe's open mouth — a poo-coloured stream that
+   *  wells at the end and arcs down under gravity (the falling drips below carry it to the pond). */
   private drawLeak(g: G): void {
-    const pulse = 0.5 + 0.5 * Math.sin(this.clock / 90);
-    const reach = CELL * (0.5 + 0.4 * pulse);
+    const stream = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.55);
     for (const leak of this.model.leaks) {
       const cx = leak.from.col * CELL + CELL / 2;
       const cy = this.rowScreenY(leak.from.row) + CELL / 2;
-      let dx = 0;
-      let dy = 0;
-      if (leak.out === Side.N) dy = -reach;
-      else if (leak.out === Side.S) dy = reach;
-      else if (leak.out === Side.W) dx = -reach;
-      else dx = reach;
-      g.fillStyle(COLORS.leak, 0.85);
-      g.fillCircle(cx + dx * 0.6, cy + dy * 0.6, CELL * 0.16);
-      g.fillCircle(cx + dx, cy + dy, CELL * 0.12 * (0.6 + pulse * 0.6));
-      g.fillStyle(COLORS.leak, 0.45);
-      g.fillCircle(cx + dx * 1.25, cy + dy * 1.25, CELL * 0.1);
+      if (cy < HUD_H - CELL) continue; // leak off the top of the view
+      const [ux, uy] = GameScene.ARROW_VEC[leak.out];
+      const ex = cx + ux * CELL * 0.5; // the open mouth sits on the cell edge
+      const ey = cy + uy * CELL * 0.5;
+      // a continuous gout of poo, recycled along its arc via the (monotonic) flow phase
+      const N = 8;
+      for (let k = 0; k < N; k++) {
+        const t = (this.flowPhase / (CELL * 0.7) + k / N) % 1; // 0..1 along the spill
+        const sx = ex + ux * t * CELL * 0.55;
+        const sy = ey + uy * t * CELL * 0.4 + t * t * CELL * 0.85; // gravity bends the stream down
+        g.fillStyle(stream, 0.92 - t * 0.35);
+        g.fillCircle(sx, sy, CELL * 0.12 * (1 - t * 0.35));
+      }
+      g.fillStyle(SEWAGE_BROWN, 1); // a fat lip welling right at the mouth
+      g.fillCircle(ex, ey, CELL * 0.12);
     }
   }
 
   /** Always-on, subtle white "lay the next piece here" hints on the build frontier
    *  (including the very first cell under the toilet). Cells that are actively
    *  leaking are skipped — those get the loud gold markers instead. */
+  // the hint SVG points NORTH; rotate it to face the pipe's extend/spill direction
+  private static readonly ARROW_ROT: Record<number, number> = {
+    [Side.N]: 0,
+    [Side.E]: Math.PI / 2,
+    [Side.S]: Math.PI,
+    [Side.W]: -Math.PI / 2,
+  };
+  private static readonly ARROW_VEC: Record<number, [number, number]> = {
+    [Side.N]: [0, -1],
+    [Side.S]: [0, 1],
+    [Side.E]: [1, 0],
+    [Side.W]: [-1, 0],
+  };
+
+  /** Three chevrons marching off a cell centre in `dir` (fading), like the plughole rings.
+   *  `speed` scales the march cadence; `tint` recolours them (red for leaks). */
+  private marchArrows(cx: number, cy: number, dir: Side, speed = 850, tint?: number): void {
+    const rot = GameScene.ARROW_ROT[dir];
+    const [vx, vy] = GameScene.ARROW_VEC[dir];
+    for (let k = 0; k < 3; k++) {
+      const phase = (this.clock / speed + k / 3) % 1;
+      const a = Math.sin(phase * Math.PI) * 0.9; // fade IN at the back, out at the front
+      if (a <= 0.03) continue;
+      const off = (phase - 0.5) * CELL * 0.6; // marches along the direction
+      // high z-order so the hint sits on top of clogs / fatbergs in the way
+      this.useSprite("hint", cx + vx * off, cy + vy * off, CELL * 0.4, Z_UI_SPRITE + 2, rot, { alpha: a, tint });
+    }
+  }
+
   private drawBuildHints(): void {
     const leakSet = new Set(this.model.leakTargets.map((c) => `${c.row},${c.col}`));
     const onScreen = (y: number) => y >= HUD_H - CELL && y <= this.pondTop;
-    // the SVG points NORTH; rotate it to point the way the pipe extends, then march
-    // 3 of them in that direction (fading) like the plughole's concentric rings
-    const ROT: Record<number, number> = {
-      [Side.N]: 0,
-      [Side.E]: Math.PI / 2,
-      [Side.S]: Math.PI,
-      [Side.W]: -Math.PI / 2,
-    };
-    const VEC: Record<number, [number, number]> = {
-      [Side.N]: [0, -1],
-      [Side.S]: [0, 1],
-      [Side.E]: [1, 0],
-      [Side.W]: [-1, 0],
-    };
     for (const { cell: t, dir } of this.model.buildFrontier) {
       if (leakSet.has(`${t.row},${t.col}`)) continue;
       const y = this.rowScreenY(t.row);
       if (!onScreen(y)) continue;
-      const cx = t.col * CELL + CELL / 2;
-      const cy = y + CELL / 2;
-      const [vx, vy] = VEC[dir];
-      for (let k = 0; k < 3; k++) {
-        const phase = (this.clock / 850 + k / 3) % 1;
-        const a = Math.sin(phase * Math.PI) * 0.9; // fade IN at the back, out at the front
-        if (a <= 0.03) continue;
-        const off = (phase - 0.5) * CELL * 0.6; // marches along the connect direction
-        // high z-order so the hint sits on top of clogs / fatbergs in the way
-        this.useSprite("hint", cx + vx * off, cy + vy * off, CELL * 0.4, Z_UI_SPRITE + 2, ROT[dir], {
-          alpha: a,
-        });
-      }
+      this.marchArrows(t.col * CELL + CELL / 2, y + CELL / 2, dir);
     }
   }
 
-  private drawLeakTarget(g: G): void {
-    const pulse = 0.5 + 0.5 * Math.sin(this.clock / 140);
+  /** Leak fix-here cue: the SAME marching chevrons as the build hints, but RED, on the empty
+   *  cell that caps the spill, pointing the way the sewage is escaping. Driven straight off the
+   *  live model, so the moment the leak is capped the arrows vanish (no lingering marker). */
+  private drawLeakArrows(): void {
     const onScreen = (y: number) => y >= HUD_H - CELL && y <= this.pondTop;
-    // build-here markers (gold) on empty cells that cap a leak
-    for (const target of this.model.leakTargets) {
-      const x = target.col * CELL;
-      const y = this.rowScreenY(target.row);
+    for (const { cell, dir } of this.model.leakHints) {
+      const y = this.rowScreenY(cell.row);
       if (!onScreen(y)) continue;
-      g.lineStyle(3 + 2 * pulse, COLORS.current, 0.5 + 0.5 * pulse);
-      g.strokeRoundedRect(x + 5, y + 5, CELL - 10, CELL - 10, 8);
-      const cx = x + CELL / 2;
-      const cy = y + CELL / 2;
-      g.fillStyle(COLORS.current, 0.5 + 0.4 * pulse);
-      const s = CELL * 0.16;
-      g.fillTriangle(cx - s, cy - s * 0.5, cx + s, cy - s * 0.5, cx, cy + s * 0.8);
-    }
-    // replace-here markers (red) on bursting tiles with no buildable escape
-    for (const burst of this.model.burstTiles) {
-      const x = burst.col * CELL;
-      const y = this.rowScreenY(burst.row);
-      if (!onScreen(y)) continue;
-      g.lineStyle(3 + 2 * pulse, COLORS.dividend, 0.6 + 0.4 * pulse);
-      g.strokeRoundedRect(x + 4, y + 4, CELL - 8, CELL - 8, 8);
+      this.marchArrows(cell.col * CELL + CELL / 2, y + CELL / 2, dir, 520, COLORS.dividend);
     }
   }
 
@@ -1689,15 +1686,15 @@ export class GameScene extends Phaser.Scene {
     }
     while (this.deadFloaters.length > dead) this.deadFloaters.pop();
 
-    // dead fish FLOAT UP from where they died to the surface, then bob belly-up
-    const RISE_MS = 1500;
+    // dead fish drift slowly UP from where they died to the surface, then gently bob
+    const RISE_MS = 2800;
     for (let k = 0; k < this.deadFloaters.length; k++) {
       const f = this.deadFloaters[k];
       const t = Math.min(1, (this.clock - f.bornAt) / RISE_MS);
-      const ease = 1 - (1 - t) * (1 - t); // ease-out rise
-      const bob = t >= 1 ? Math.sin(this.clock / 360 + f.x) * 1.5 : 0;
+      const ease = 1 - (1 - t) * (1 - t); // ease-out rise (slow drift to the surface)
+      const bob = t >= 1 ? Math.sin(this.clock / 420 + f.x) * 1.5 : 0;
       const fy = f.startY + (surfaceY - f.startY) * ease + bob;
-      this.drawFish(g, f.x, fy, k % 2 ? 1 : -1, f.kind, true);
+      this.drawFish(g, f.x, fy, f.kind % 2 ? 1 : -1, f.kind, true);
     }
 
     // live fish swim below the surface
@@ -1737,10 +1734,11 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawFish(g: G, cx: number, cy: number, dir: number, kind = 0, dead = false): void {
-    // dead fish use the greyscale sprite, belly-up; live fish use their species colour
-    const key = dead ? "fish-dead" : `fish-${(kind % 5) + 1}`;
+    // a dead fish is the SAME species shape, just greyscaled (not a different sprite, not belly-up)
+    const species = (kind % 5) + 1;
+    const key = dead ? `fish-${species}-dead` : `fish-${species}`;
     const sz = 30 + (kind % 3) * 7; // species vary in size
-    if (this.useSprite(key, cx, cy, sz, Z_UI_SPRITE + 1, 0, { flipX: dir < 0, flipY: dead })) return;
+    if (this.useSprite(key, cx, cy, sz, Z_UI_SPRITE + 1, 0, { flipX: dir < 0 })) return;
     // fallback: a simple coloured ellipse
     const color = dead ? COLORS.fishDead : FISH_COLORS[kind % FISH_COLORS.length];
     g.fillStyle(color, dead ? 0.92 : 1);
