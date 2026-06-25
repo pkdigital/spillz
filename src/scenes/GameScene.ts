@@ -201,6 +201,12 @@ export class GameScene extends Phaser.Scene {
   private model!: Game;
   private gfxWorld!: G;
   private gfxUi!: G;
+  /** Leading (filling) tile drawn as the FULL settled poo shape, revealed by a growing
+   *  geometry mask — an animated wipe of the real shape, so the elbow is always correctly
+   *  rounded and can never show a notch or overshoot (the shape itself bounds the poo). */
+  private gfxFront!: G;
+  private frontMaskG!: G;
+  private frontMask!: Phaser.Display.Masks.GeometryMask;
   /** Dedicated, masked layer for the next-piece reel so symbols clip at the box rim.
    *  The mask is applied ONLY while spinning — a persistent mask does a per-frame
    *  stencil pass even when idle, which is slow on software WebGL. */
@@ -214,10 +220,13 @@ export class GameScene extends Phaser.Scene {
   private scrollPx = 0;
   private scrollTargetPx = 0;
   private clock = 0;
+  private flowPhase = 0; // accumulated flow-texture drift in px (moves with the sewage front)
 
   /** Falling spilled-sewage particles (leak -> pond). */
   private drips: Drip[] = [];
   private splashes: Splash[] = [];
+  /** Dead fish, each rising from where it died up to the pond surface (then bobbing). */
+  private deadFloaters: { kind: number; x: number; startY: number; bornAt: number }[] = [];
   private dripTimer = 0;
   /** Unflushables tumbling into the pond after being flowed through. */
   private junkDrops: JunkDrop[] = [];
@@ -234,6 +243,8 @@ export class GameScene extends Phaser.Scene {
   private explosions: { row: number; col: number; start: number }[] = [];
   /** Hit-rect of the end-of-level dialog button (null when no dialog is shown). */
   private endButton: { x: number; y: number; w: number; h: number } | null = null;
+  /** Hit-rect of the pre-run Start button (null once the run has begun). */
+  private startButton: { x: number; y: number; w: number; h: number } | null = null;
   // drag-to-scroll: distinguish a tap (place) from a drag (pan), and peek away
   // from the auto-follow camera until `manualScrollUntil`, then drift back.
   private dragStartX = 0;
@@ -242,6 +253,12 @@ export class GameScene extends Phaser.Scene {
   private dragging = false;
   private manualScrollUntil = 0;
   private buttonText!: Phaser.GameObjects.Text;
+  // SNES-style level-clear tally (count-up + beeps)
+  private tallyStart = 0;
+  private tallyFishCounted = 0;
+  private tallyBonusBleepAt = 0;
+  private tallyDoneBleeped = false;
+  private audio?: AudioContext;
 
   /** Current on-screen "Oh No. Condom!"-style toast. */
   private toast: { label: string; icon: string; start: number } | null = null;
@@ -287,9 +304,11 @@ export class GameScene extends Phaser.Scene {
     this.scrollPx = 0;
     this.scrollTargetPx = 0;
     this.clock = 0;
+    this.flowPhase = 0;
     this.spriteIdx = 0;
     this.drips = [];
     this.splashes = [];
+    this.deadFloaters = [];
     this.dripTimer = 0;
     this.junkDrops = [];
     this.placedAnim.clear();
@@ -299,6 +318,10 @@ export class GameScene extends Phaser.Scene {
     this.boxX = 0;
     this.explosions = [];
     this.endButton = null;
+    this.startButton = null;
+    this.tallyStart = 0;
+    this.tallyFishCounted = 0;
+    this.tallyDoneBleeped = false;
     this.dragStartY = null;
     this.dragging = false;
     this.manualScrollUntil = 0;
@@ -309,6 +332,11 @@ export class GameScene extends Phaser.Scene {
     this.labels = [];
 
     this.gfxWorld = this.add.graphics();
+    // Leading-tile layer sits just above the world poo, clipped by its own growing mask.
+    this.gfxFront = this.add.graphics().setDepth(1);
+    this.frontMaskG = this.add.graphics().setVisible(false);
+    this.frontMask = this.frontMaskG.createGeometryMask();
+    this.gfxFront.setMask(this.frontMask);
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
     this.reelGfx = this.add.graphics().setDepth(Z_UI);
     this.reelMaskG = this.add.graphics().setVisible(false);
@@ -361,7 +389,39 @@ export class GameScene extends Phaser.Scene {
     this.input.keyboard?.on("keydown-D", () => this.model.killFish());
   }
 
+  /** Lazily create + unlock the WebAudio context on the first user gesture. */
+  private unlockAudio(): void {
+    try {
+      if (!this.audio) this.audio = new AudioContext();
+      if (this.audio.state === "suspended") void this.audio.resume();
+    } catch {
+      /* audio unavailable — silent */
+    }
+  }
+
+  /** A short synthesised bleep (no audio assets needed). */
+  private beep(freq: number, durMs: number, type: OscillatorType = "square", vol = 0.05): void {
+    const ctx = this.audio;
+    if (!ctx || ctx.state !== "running") return;
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(vol, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + durMs / 1000);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + durMs / 1000);
+    } catch {
+      /* ignore */
+    }
+  }
+
   private onDown(p: Phaser.Input.Pointer): void {
+    this.unlockAudio();
     this.dragStartX = p.x;
     this.dragStartY = p.y;
     this.dragStartScroll = this.scrollPx;
@@ -386,6 +446,16 @@ export class GameScene extends Phaser.Scene {
     this.dragStartY = null;
     this.dragging = false;
     if (wasDrag) return; // it was a scroll, not a placement
+
+    // Pre-run Start screen: only the Start button does anything.
+    if (!this.model.started) {
+      const b = this.startButton;
+      if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+        this.unlockAudio();
+        this.model.beginRun();
+      }
+      return;
+    }
 
     // Defer scene restarts to the next update tick (restarting inside an input
     // callback can leave the scene half-torn-down -> blank screen).
@@ -446,11 +516,19 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.clock += deltaMs;
+    // Advance the flow-texture phase at exactly the speed the sewage front moves (one CELL
+    // per ring). Accumulated (not clock×rate) so a rate change — superflow, speed powers —
+    // changes future drift without teleporting every speck.
+    this.flowPhase += deltaMs * (CELL / Math.max(1, this.model.ringFlowMs));
     this.model.update(deltaMs);
 
     // level cleared: burst confetti, then wait for a tap to move on
     if (this.model.state === "WON" && this.prevState !== "WON") {
       this.spawnConfetti();
+      this.tallyStart = this.clock; // begin the level-clear count-up
+      this.tallyFishCounted = 0;
+      this.tallyBonusBleepAt = 0;
+      this.tallyDoneBleeped = false;
     }
     this.prevState = this.model.state;
 
@@ -646,6 +724,9 @@ export class GameScene extends Phaser.Scene {
   private render(): void {
     const w = this.gfxWorld;
     w.clear();
+    this.gfxFront.clear();
+    this.frontMaskG.clear();
+    this.frontMaskG.fillStyle(0xffffff, 1);
     this.spriteIdx = 0;
     this.labelIdx = 0;
 
@@ -705,7 +786,9 @@ export class GameScene extends Phaser.Scene {
       const cx = seg.coord.col * CELL + CELL / 2;
       const cy = this.rowScreenY(seg.coord.row) + CELL / 2;
       if (seg.at === ringStart && progress < 1) {
-        this.drawSewagePartial(w, cx, cy, cell.openings, seg.entry, progress, seg.coord);
+        // leading tile: draw the FULL poo shape into the masked layer, and grow the mask
+        this.drawSewageFill(this.gfxFront, cx, cy, cell.openings, seg.coord);
+        this.growFrontMask(cx, cy, cell.openings, seg.entry, progress);
       } else {
         this.drawSewageFill(w, cx, cy, cell.openings, seg.coord);
       }
@@ -725,6 +808,7 @@ export class GameScene extends Phaser.Scene {
     this.renderConfetti(u);
     this.renderToast(u);
     this.renderEndDialog(u); // modal card, drawn on top of everything
+    this.renderStartOverlay(u); // pre-run Start screen (mutually exclusive with the end card)
 
     for (let i = this.spriteIdx; i < this.sprites.length; i++) this.sprites[i].setVisible(false);
     for (let i = this.labelIdx; i < this.labels.length; i++) this.labels[i].setVisible(false);
@@ -1095,127 +1179,86 @@ export class GameScene extends Phaser.Scene {
     g.fillStyle(base, 1);
     this.pipeShape(g, cx, cy, openings, t, half);
 
-    const ph = hash3(coord.row, coord.col, 5);
     const n = openings & Side.N;
     const s = openings & Side.S;
     const w = openings & Side.W;
     const e = openings & Side.E;
-    // channels span only the arms that exist (so specks never drift into a bend's
-    // empty quadrant and look like they're leaking out of the pipe)
-    const vTop = n ? cy - half : cy - t / 2;
-    const vBot = s ? cy + half : cy + t / 2;
-    const hL = w ? cx - half : cx - t / 2;
-    const hR = e ? cx + half : cx + t / 2;
-    // a soft speck that fades in, travels the channel, fades out (no jump at the wrap)
-    const speck = (along: number, vertical: boolean, lane: number, col: number) => {
-      const a = Math.sin(along * Math.PI) * 0.5; // 0 at both ends -> seamless loop
-      if (a <= 0.02) return;
-      g.fillStyle(col, a);
-      if (vertical) g.fillCircle(cx + lane, vTop + along * (vBot - vTop), t * 0.26);
-      else g.fillCircle(hL + along * (hR - hL), cy + lane, t * 0.26);
-    };
-    const flow = this.clock / 1500; // continuous scroll (down / right)
-    if (n || s) {
-      for (let k = 0; k < 3; k++) {
-        const along = (flow + k / 3 + ph) % 1;
-        speck(along, true, (k - 1) * t * 0.16, k === 1 ? lite : dark);
-      }
-    }
-    if (w || e) {
-      for (let k = 0; k < 3; k++) {
-        const along = (flow + 0.16 + k / 3 + ph) % 1;
-        speck(along, false, (k - 1) * t * 0.16, k === 1 ? lite : dark);
-      }
-    }
-    // a subtle dark core so the centre reads as deeper sewage
-    g.fillStyle(dark, 0.28);
+    // WORLD-anchored specks so the poo flows as one continuous stream across cells.
+    // (the old per-cell random phase made every tile animate on its own — the "jump".)
+    // Channels stop at the hub centre on a CLOSED side (not the rounded-off stub at ±t/2),
+    // so a bend's specks turn the corner instead of poking past the rounded pipe edge.
+    if (n || s) this.flowSpecks(g, true, cx, n ? cy - half : cy, s ? cy + half : cy, t, dark, lite);
+    if (w || e) this.flowSpecks(g, false, cy, w ? cx - half : cx, e ? cx + half : cx, t, dark, lite);
+    g.fillStyle(dark, 0.28); // subtle dark core
     g.fillCircle(cx, cy, t * 0.34);
   }
 
-  private drawSewagePartial(
-    g: G,
-    cx: number,
-    cy: number,
-    openings: number,
-    entry: Side | null,
-    p: number,
-    coord: { row: number; col: number },
-  ): void {
-    const half = CELL / 2;
-    const t = CELL * 0.22; // match a full tile's poo width
-    // same varied yellow/brown as a settled tile, so there's no colour "pop" when it completes
-    const seed = hash3(coord.row, coord.col, 2);
-    const base = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.4 + seed * 0.25);
-    const dark = shade(base, 0.72);
-    const lite = shade(base, 1.18);
-    const exits = sidesOf(openings).filter((s) => s !== entry) as Side[];
+  /** Specks drifting down a vertical channel (or right along a horizontal one), anchored
+   *  to WORLD coordinates so adjacent tiles line up into one continuous flowing stream. */
+  private flowSpecks(g: G, vertical: boolean, fixed: number, lo: number, hi: number, t: number, dark: number, lite: number): void {
+    if (hi - lo < 3) return;
+    const SPACING = CELL * 0.42;
+    const r = t * 0.24; // speck radius
+    const laneMax = t * 0.14; // perpendicular jitter — kept well inside the pipe wall (r+lane < t/2)
+    const fade = r * 2; // specks fade in/out within this distance of a channel end (kills the boundary pop)
+    // MONOTONIC flow offset — no modulo. A speck's identity is its integer index k, so its
+    // lane and colour never re-shuffle (the old `% SPACING` wrap re-indexed every speck each
+    // cycle, which read as the whole stream "resetting" and jumping toward the rim). The phase
+    // accumulates at the real sewage speed, so the texture moves in lockstep with the front.
+    const flow = this.flowPhase;
+    const wLo = vertical ? lo - HUD_H + this.scrollPx : lo; // vertical scrolls with the camera; horizontal doesn't
+    const wHi = vertical ? hi - HUD_H + this.scrollPx : hi;
+    const kStart = Math.ceil((wLo - flow) / SPACING);
+    const kEnd = Math.floor((wHi - flow) / SPACING);
+    for (let k = kStart; k <= kEnd; k++) {
+      const world = k * SPACING + flow;
+      const pos = vertical ? world - this.scrollPx + HUD_H : world;
+      const edge = Math.min(pos - lo, hi - pos); // distance to nearest channel end (screen space)
+      if (edge <= 0) continue;
+      const a = 0.5 * Math.min(1, edge / fade); // fade so nothing pops in/out at the clip boundary
+      const lane = ((((k % 3) + 3) % 3) - 1) * laneMax;
+      g.fillStyle(k % 2 === 0 ? lite : dark, a);
+      if (vertical) g.fillCircle(fixed + lane, pos, r);
+      else g.fillCircle(pos, fixed + lane, r);
+    }
+  }
 
-    const ph = hash3(coord.row, coord.col, 5);
-    const point = (side: Side, distFromHub: number): [number, number] => {
-      if (side === Side.N) return [cx, cy - distFromHub];
-      if (side === Side.S) return [cx, cy + distFromHub];
-      if (side === Side.W) return [cx - distFromHub, cy];
-      return [cx + distFromHub, cy];
+  /** Grow the reveal mask for the leading tile (Bootstrap-progress-bar style): the fill amount
+   *  is a single scalar — arc-length swept along the pipe's centre-PATH — not a pair of arm
+   *  rectangles. We sweep a fat round-capped stroke (overlapping circles) entry-edge -> hub ->
+   *  exit up to that arc-length. Centred + round-joined, it fills a bend's elbow symmetrically
+   *  and can never bulge sideways into the perpendicular arm (the old rect notch). The full poo
+   *  shape underneath bounds the visible poo, so the stroke can't overshoot the pipe. */
+  private growFrontMask(cx: number, cy: number, openings: number, entry: Side | null, p: number): void {
+    const m = this.frontMaskG;
+    const half = CELL / 2;
+    const R = CELL * 0.14; // stroke radius: a hair over the poo half-width (0.11) so edges aren't clipped
+    const STEP = CELL * 0.05; // circle spacing (heavy overlap -> a clean fat line)
+    const dir = (s: Side): [number, number] =>
+      s === Side.N ? [0, -1] : s === Side.S ? [0, 1] : s === Side.W ? [-1, 0] : [1, 0];
+    const stroke = (sx: number, sy: number, dx: number, dy: number, len: number): void => {
+      for (let s = 0; s < len; s += STEP) m.fillCircle(sx + dx * s, sy + dy * s, R);
+      m.fillCircle(sx + dx * len, sy + dy * len, R); // exact endpoint
     };
-
-    g.fillStyle(base, 1);
-    let hubWet = entry === null;
+    const exits = sidesOf(openings).filter((s) => s !== entry) as Side[];
     if (entry === null) {
-      const L = half * p;
+      // source: just the exits growing out of the hub
       for (const ex of exits) {
-        this.fillArmFromHub(g, cx, cy, ex, L, t);
-        const [fx, fy] = point(ex, L);
-        this.flowAlong(g, cx, cy, fx, fy, dark, lite, t, ph + ex * 0.11); // hub -> front
+        const [dx, dy] = dir(ex);
+        stroke(cx, cy, dx, dy, half * p);
       }
-      g.fillRect(cx - t / 2, cy - t / 2, t, t);
-    } else {
-      const q1 = Math.min(1, p * 2);
-      const Le = half * q1;
-      this.fillArmFromEdge(g, cx, cy, entry, Le, t);
-      const [ex0, ey0] = point(entry, half); // the cell edge
-      const [ex1, ey1] = point(entry, half - Le); // the advancing front
-      this.flowAlong(g, ex0, ey0, ex1, ey1, dark, lite, t, ph); // edge -> front (inflow)
-      if (p >= 0.5) {
-        hubWet = true;
-        g.fillRect(cx - t / 2, cy - t / 2, t, t);
-        const Lx = half * (p - 0.5) * 2;
-        for (const ex of exits) {
-          this.fillArmFromHub(g, cx, cy, ex, Lx, t);
-          const [fx, fy] = point(ex, Lx);
-          this.flowAlong(g, cx, cy, fx, fy, dark, lite, t, ph + ex * 0.11); // hub -> front
-        }
+      return;
+    }
+    const [ex, ey] = dir(entry); // hub -> entry edge
+    const d = CELL * p; // arc length from the entry edge (half in to the hub, half out to an exit)
+    stroke(cx + ex * half, cy + ey * half, -ex, -ey, Math.min(d, half)); // entry edge -> hub
+    if (d > half) {
+      const out = Math.min(d - half, half);
+      for (const exit of exits) {
+        const [dx, dy] = dir(exit);
+        stroke(cx, cy, dx, dy, out); // hub -> exit
       }
     }
-    if (hubWet) {
-      g.fillStyle(dark, 0.28); // textured core, matches a settled tile
-      g.fillCircle(cx, cy, t * 0.34);
-    }
-  }
-
-  /** Drifting poo specks flowing from A to B (used to animate the filling part of a tile). */
-  private flowAlong(g: G, ax: number, ay: number, bx: number, by: number, dark: number, lite: number, t: number, ph: number): void {
-    for (let k = 0; k < 2; k++) {
-      const f = (this.clock / 1400 + ph + k * 0.5) % 1;
-      const a = Math.sin(f * Math.PI) * 0.5; // fade in at A, out at B (the front)
-      if (a <= 0.03) continue;
-      g.fillStyle(k === 0 ? lite : dark, a);
-      g.fillCircle(ax + (bx - ax) * f, ay + (by - ay) * f, t * 0.26);
-    }
-  }
-
-  private fillArmFromHub(g: G, cx: number, cy: number, side: Side, len: number, t: number): void {
-    if (side === Side.N) g.fillRect(cx - t / 2, cy - len, t, len);
-    else if (side === Side.S) g.fillRect(cx - t / 2, cy, t, len);
-    else if (side === Side.W) g.fillRect(cx - len, cy - t / 2, len, t);
-    else g.fillRect(cx, cy - t / 2, len, t);
-  }
-
-  private fillArmFromEdge(g: G, cx: number, cy: number, side: Side, len: number, t: number): void {
-    const half = CELL / 2;
-    if (side === Side.N) g.fillRect(cx - t / 2, cy - half, t, len);
-    else if (side === Side.S) g.fillRect(cx - t / 2, cy + half - len, t, len);
-    else if (side === Side.W) g.fillRect(cx - half, cy - t / 2, len, t);
-    else g.fillRect(cx + half - len, cy - t / 2, len, t);
   }
 
   private drawLeak(g: G): void {
@@ -1628,28 +1671,46 @@ export class GameScene extends Phaser.Scene {
       g.fillRect(x - 1, gy, 2, 1.5);
     }
 
-    // the level's own fish: live ones swim, the dead float belly-up at the surface
     const cleanH = POND_H - shitH;
     const total = this.model.fishCount;
     const kinds = this.model.fishKinds;
     const dead = this.model.fishDead; // >0 only once the pond is past half-full
+    const surfaceY = y0 + 9;
+
+    // sync the dead-floater list with the model's dead count (a fish just died -> add one)
+    while (this.deadFloaters.length < dead) {
+      const idx = this.deadFloaters.length;
+      this.deadFloaters.push({
+        kind: kinds[idx] ?? 0,
+        x: 24 + ((idx * 67) % (GAME_WIDTH - 48)),
+        startY: y0 + cleanH * (0.4 + hash3(idx, 8, 3) * 0.4), // dies somewhere mid-pond
+        bornAt: this.clock,
+      });
+    }
+    while (this.deadFloaters.length > dead) this.deadFloaters.pop();
+
+    // dead fish FLOAT UP from where they died to the surface, then bob belly-up
+    const RISE_MS = 1500;
+    for (let k = 0; k < this.deadFloaters.length; k++) {
+      const f = this.deadFloaters[k];
+      const t = Math.min(1, (this.clock - f.bornAt) / RISE_MS);
+      const ease = 1 - (1 - t) * (1 - t); // ease-out rise
+      const bob = t >= 1 ? Math.sin(this.clock / 360 + f.x) * 1.5 : 0;
+      const fy = f.startY + (surfaceY - f.startY) * ease + bob;
+      this.drawFish(g, f.x, fy, k % 2 ? 1 : -1, f.kind, true);
+    }
+
+    // live fish swim below the surface
     const span = GAME_WIDTH + 80;
-    const bandTop = y0 + 26; // live fish swim BELOW the surface, leaving the top for floaters
+    const bandTop = y0 + 26;
     const bandBot = y0 + Math.max(40, cleanH - 10);
-    for (let i = 0; i < total; i++) {
+    for (let i = dead; i < total; i++) {
       const kind = kinds[i] ?? 0;
-      if (i < dead) {
-        // dead — bob lifelessly right at the surface
-        const fx = 24 + ((i * 67) % (GAME_WIDTH - 48));
-        const fy = y0 + 9 + Math.sin(this.clock / 360 + i) * 1.5;
-        this.drawFish(g, fx, fy, i % 2 ? 1 : -1, kind, true);
-      } else {
-        const dir = hash3(i, 5, 1) > 0.5 ? 1 : -1; // some swim left, some right
-        const speed = (0.018 + hash3(i, 2, 3) * 0.022) * dir; // px per ms
-        const fx = (((hash3(i, 9, 2) * span + this.clock * speed) % span) + span) % span - 40;
-        const fy = bandTop + hash3(i, 4, 7) * (bandBot - bandTop) + Math.sin(this.clock / 500 + i * 2) * 4;
-        this.drawFish(g, fx, fy, dir, kind, false);
-      }
+      const dir = hash3(i, 5, 1) > 0.5 ? 1 : -1; // some swim left, some right
+      const speed = (0.018 + hash3(i, 2, 3) * 0.022) * dir; // px per ms
+      const fx = (((hash3(i, 9, 2) * span + this.clock * speed) % span) + span) % span - 40;
+      const fy = bandTop + hash3(i, 4, 7) * (bandBot - bandTop) + Math.sin(this.clock / 500 + i * 2) * 4;
+      this.drawFish(g, fx, fy, dir, kind, false);
     }
   }
 
@@ -1691,8 +1752,8 @@ export class GameScene extends Phaser.Scene {
 
   private renderHud(_g: G): void {
     const m = this.model;
-    // level + live score (purity banked + this level's remaining) + fish count
-    this.statusText.setText(`LEVEL ${m.level}\nSCORE ${m.runScore + m.levelScore}\nFISH ${m.fishAlive}`);
+    // level + banked score + live fish count (points are tallied on the clear screen)
+    this.statusText.setText(`LEVEL ${m.level}\nSCORE ${m.runScore}\nFISH ${m.fishAlive}`);
     this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
@@ -1723,7 +1784,7 @@ export class GameScene extends Phaser.Scene {
     g.fillRect(0, 0, GAME_WIDTH, this.viewH);
 
     const pw = 400;
-    const ph = 300;
+    const ph = 330;
     const px = GAME_WIDTH / 2 - pw / 2;
     const py = this.viewH / 2 - ph / 2;
     g.fillStyle(0x12100e, 0.97);
@@ -1732,10 +1793,13 @@ export class GameScene extends Phaser.Scene {
     g.strokeRoundedRect(px, py, pw, ph, 18);
 
     const title = won ? "POND SAVED!" : "POND POLLUTED";
-    const tally = won
-      ? `${m.fishAlive} FISH RESCUED\n+${m.levelScore} POINTS\nSCORE: ${m.runScore}`
-      : `${m.fishCount} FISH DIED\n${m.levelScore} POINTS LOST\nSCORE: ${m.runScore}`;
-    this.centerText.setPosition(GAME_WIDTH / 2, py + 86).setText(`${title}\n\n${tally}`);
+    let body: string;
+    if (won) {
+      body = this.tallyText(m);
+    } else {
+      body = `\n${m.fishCount} FISH LOST\n\nSCORE  ${m.runScore}`;
+    }
+    this.centerText.setPosition(GAME_WIDTH / 2, py + 96).setText(`${title}\n${body}`);
 
     const bw = 240;
     const bh = 58;
@@ -1748,5 +1812,75 @@ export class GameScene extends Phaser.Scene {
       .setPosition(GAME_WIDTH / 2, by + bh / 2)
       .setText(won ? "NEXT LEVEL" : "TRY AGAIN")
       .setVisible(true);
+  }
+
+  /** Pre-run Start screen: a title, instructions (level 1), and a Start button that
+   *  kicks off the run (the poo then starts welling out and the countdown ticks). */
+  private renderStartOverlay(g: G): void {
+    const m = this.model;
+    if (m.started) {
+      this.startButton = null;
+      return;
+    }
+    g.fillStyle(0x05070c, 0.66); // dim the board behind it
+    g.fillRect(0, 0, GAME_WIDTH, this.viewH);
+
+    const pw = 430;
+    const ph = 320;
+    const px = GAME_WIDTH / 2 - pw / 2;
+    const py = this.viewH / 2 - ph / 2;
+    g.fillStyle(0x12100e, 0.97);
+    g.fillRoundedRect(px, py, pw, ph, 18);
+    g.lineStyle(3, COLORS.pondClean, 0.95);
+    g.strokeRoundedRect(px, py, pw, ph, 18);
+
+    const intro =
+      m.level === 1
+        ? "FLOWZ\n\nWater firms dump sewage\nin the river!\n\nDivert it to the tank\n& save the fish."
+        : `LEVEL ${m.level}\n\nDivert the sewage —\nsave the fish!`;
+    this.centerText.setPosition(GAME_WIDTH / 2, py + 110).setText(intro);
+
+    const bw = 240;
+    const bh = 58;
+    const bx = GAME_WIDTH / 2 - bw / 2;
+    const by = py + ph - bh - 26;
+    g.fillStyle(COLORS.pondClean, 0.95);
+    g.fillRoundedRect(bx, by, bw, bh, 12);
+    this.startButton = { x: bx, y: by, w: bw, h: bh };
+    this.buttonText.setPosition(GAME_WIDTH / 2, by + bh / 2).setText("START").setVisible(true);
+  }
+
+  /** SNES-style results: fish bip up one at a time, then the purity bonus rolls up
+   *  fast with a high beep, all adding into the running SCORE. */
+  private tallyText(m: Game): string {
+    const t = this.clock - this.tallyStart;
+    const fish = m.fishAlive;
+    const purity = m.levelPurityBonus;
+    const base = m.runScore - m.levelFishBonus - purity; // total before this level's tally
+
+    const FISH_STEP = 320;
+    const fishShown = Math.min(fish, Math.max(0, Math.floor(t / FISH_STEP)));
+    const bonusStart = fish * FISH_STEP + 400;
+    const bonusDur = 1100;
+    const purityShown =
+      t < bonusStart ? 0 : Math.min(purity, Math.round((purity * (t - bonusStart)) / bonusDur));
+    const done = t > bonusStart + bonusDur + 150;
+
+    // sounds
+    if (fishShown > this.tallyFishCounted) {
+      this.tallyFishCounted = fishShown;
+      this.beep(680 + fishShown * 70, 90, "square"); // a rising bip per fish
+    }
+    if (t >= bonusStart && purityShown < purity && this.clock - this.tallyBonusBleepAt > 45) {
+      this.tallyBonusBleepAt = this.clock;
+      this.beep(1320, 35, "square", 0.035); // rapid high beep while the bonus rolls
+    }
+    if (done && !this.tallyDoneBleeped) {
+      this.tallyDoneBleeped = true;
+      this.beep(1245, 200, "triangle", 0.06); // ding!
+    }
+
+    const scoreShown = base + fishShown * CONFIG.fishPoints + purityShown;
+    return `\nFISH  x ${fishShown}\nPURITY BONUS  ${purityShown}\n\nSCORE  ${scoreShown}`;
   }
 }

@@ -80,10 +80,9 @@ export const CONFIG = {
   hazardClearPounds: 150_000,
   hazardClearHit: 0.08,
 
-  // --- purity score: a pristine pond banks points; junk + spills chip them away ---
-  levelScoreBase: 1000,
-  junkScorePenalty: 120,
-  spillScorePenalty: 25,
+  // --- score: tallied additively on the level-clear screen (SNES style) ---
+  fishPoints: 500, // points per fish rescued
+  purityBonusMax: 8000, // bonus for a perfectly pristine pond (scales with final quality)
 
   // --- bosses: the fatberg + the dynamite that clears it ---
   /** First level a fatberg boss can appear. */
@@ -172,17 +171,14 @@ export class Game {
   private readonly fishKindsArr: number[] = [];
   /** Cumulative fish rescued across the whole run. */
   fishSaved: number;
-  /** Purity points banked from completed levels (the run score). */
+  /** Total score banked from completed levels (the run score). */
   runScore: number;
-  /** This level's available purity points — junk + spills chip it away; banked on win. */
-  levelScore: number;
 
   constructor(rng: () => number = Math.random, level = 1, fishSaved = 0, runScore = 0) {
     this.rng = rng;
     this.levelNumber = level;
     this.fishSaved = fishSaved;
     this.runScore = runScore;
-    this.levelScore = CONFIG.levelScoreBase;
     this.levelFish = fishForLevel(level);
     this.grid = new Grid(CONFIG.cols);
 
@@ -227,6 +223,16 @@ export class Game {
   /** Fish still alive in the pond right now. */
   get fishAlive(): number {
     return this.levelFish - this.fishDead;
+  }
+
+  /** Points from the fish rescued this level (tallied on the clear screen). */
+  get levelFishBonus(): number {
+    return this.fishAlive * CONFIG.fishPoints;
+  }
+
+  /** Cleanliness bonus this level — scales with the final pond quality. */
+  get levelPurityBonus(): number {
+    return Math.round(this.balance * CONFIG.purityBonusMax);
   }
 
   /** Dev helper: drop the quality meter just enough to kill one more fish. */
@@ -296,6 +302,12 @@ export class Game {
   /** The power-up marker (if any) on the empty ground at `c`. */
   powerMarkerAt(c: Coord): { power: PowerType; mag: number } | undefined {
     return this.powerMarkers.get(keyOf(c));
+  }
+
+  /** The current per-ring flow duration in ms (one tile of sewage advance). For the
+   *  renderer to drift its flow texture at exactly the speed the sewage actually moves. */
+  get ringFlowMs(): number {
+    return this.currentFlowMs;
   }
 
   /** 0..1 fill animation progress of the cells in the current ring. */
@@ -420,7 +432,6 @@ export class Game {
       // Clearing a clog dumps it straight into the pond and pollutes — immediately.
       this.adjustBalance(-CONFIG.hazardClearHit);
       this.profitPounds += CONFIG.hazardClearPounds;
-      this.levelScore = Math.max(0, this.levelScore - CONFIG.junkScorePenalty); // junk in the pond
       this.events.push({ kind: "clog", junk: clogJunk, coord: c });
     } else if (isOverwrite) {
       // Overwriting your OWN pipe is wasteful — shareholders profit.
@@ -550,11 +561,11 @@ export class Game {
     // Keep the board seeded well ahead of the descending flood.
     this.seedBoardThrough(this.maxFilledRow + CONFIG.rows * 2);
 
-    // The run is paused until the player lays the first pipe under the toilet.
+    // The run is paused until it's begun — either via the Start button (beginRun)
+    // or, as a fallback, by laying the first pipe under the toilet.
     if (!this.started) {
       if (this.grid.get({ row: 1, col: CONFIG.sourceCol }) === null) return;
-      this.started = true;
-      this.elapsed = 0; // the countdown clock begins now
+      this.beginRun();
     }
     this.elapsed += dtMs;
     this.tickFuses(dtMs);
@@ -599,6 +610,13 @@ export class Game {
     const entry = opposite(leak.out); // side the cap must face back toward the spill
     const goal = entry === Side.S ? Side.N : Side.S; // ...and continue down to the works
     return PIECE_FOR_OPENINGS[entry | goal] ?? "straight-v";
+  }
+
+  /** Begin the run (the Start button) — the poo starts welling and the countdown ticks. */
+  beginRun(): void {
+    if (this.started) return;
+    this.started = true;
+    this.elapsed = 0;
   }
 
   /** ms left on the fuse of a dynamite tile, or undefined if it isn't armed. */
@@ -700,7 +718,6 @@ export class Game {
     if (n > 0) {
       this.adjustBalance(-CONFIG.spillDrainPerTick * n);
       this.profitPounds += CONFIG.spillPounds * n;
-      this.levelScore = Math.max(0, this.levelScore - CONFIG.spillScorePenalty * n); // spill chips purity
       if (this.state !== "FLOWING") return;
     }
 
@@ -720,7 +737,7 @@ export class Game {
     if (cell?.type === "terminal") {
       this.state = "WON"; // sewage reached the treatment works — pond saved!
       this.fishSaved += this.fishAlive; // bank the survivors
-      this.runScore += this.levelScore; // bank the level's remaining purity points
+      this.runScore += this.levelFishBonus + this.levelPurityBonus; // tally the points
       return;
     }
     if (cell?.power) this.applyPower(coord, cell.power);
