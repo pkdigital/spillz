@@ -1,6 +1,6 @@
 import Phaser from "phaser";
 import { CONFIG, Game } from "../core/game";
-import { PIECE_OPENINGS, sidesOf } from "../core/pieces";
+import { PIECE_OPENINGS, sidesOf, JUNK_TYPES } from "../core/pieces";
 import {
   Side,
   type Cell,
@@ -186,6 +186,7 @@ const SEWAGE_BROWN = 0x5c3c19;
 const FISH_COLORS = [0x9be15d, 0xffb347, 0x6fd3ff, 0xff8da3, 0xc792ea, 0xf6e05e];
 
 const PLACE_ANIM_MS = 170;
+const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
 
 /** Ease-out with a little overshoot — the "ta-da" pop. */
 function easeOutBack(t: number): number {
@@ -215,6 +216,8 @@ export class GameScene extends Phaser.Scene {
   private scrollTargetPx = 0;
   private clock = 0;
   private flowPhase = 0; // accumulated flow-texture drift in px (moves with the sewage front)
+  private runBeganAt = -1e9; // clock time the run started (drives the board-reveal intro)
+  private intro = 0; // 0..1 board-reveal progress, recomputed each render
 
   /** Falling spilled-sewage particles (leak -> pond). */
   private drips: Drip[] = [];
@@ -309,6 +312,8 @@ export class GameScene extends Phaser.Scene {
     this.banner = null;
     this.bannerQueue = [];
     this.prevStarted = false;
+    this.runBeganAt = -1e9;
+    this.intro = 0;
     this.scrollPx = 0;
     this.scrollTargetPx = 0;
     this.clock = 0;
@@ -490,6 +495,8 @@ export class GameScene extends Phaser.Scene {
       }
       return;
     }
+    // No placing until the board-reveal has settled — the game proper starts after the reel.
+    if (this.clock - this.runBeganAt < INTRO_MS) return;
     const coord = this.toCell(p.x, p.y);
     if (coord && this.model.placePiece(coord)) {
       this.placedAnim.set(`${coord.row},${coord.col}`, this.clock); // animate it drawing in
@@ -543,7 +550,10 @@ export class GameScene extends Phaser.Scene {
     // per ring). Accumulated (not clock×rate) so a rate change — superflow, speed powers —
     // changes future drift without teleporting every speck.
     this.flowPhase += deltaMs * (CELL / Math.max(1, this.model.ringFlowMs));
-    this.model.update(deltaMs);
+    // Hold the countdown while the board is still revealing (obstacles reeling in). The reveal is
+    // a pure scene animation; the game proper only begins once every tile has settled.
+    const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
+    this.model.update(revealing ? 0 : deltaMs);
 
     // level cleared: burst confetti, then wait for a tap to move on
     if (this.model.state === "WON" && this.prevState !== "WON") {
@@ -567,8 +577,9 @@ export class GameScene extends Phaser.Scene {
       else if (e.kind === "explosion") this.explosions.push({ ...e.coord, start: this.clock });
     }
 
-    // Llamatron-style instruction banners
+    // Llamatron-style instruction banners + board-reveal intro kick-off
     if (this.model.started && !this.prevStarted) {
+      this.runBeganAt = this.clock; // start the obstacles-spin-in / queue-slide reveal
       this.queueBanner([`LEVEL ${this.model.level}`], 1900); // level-start flash
     }
     this.prevStarted = this.model.started;
@@ -765,6 +776,9 @@ export class GameScene extends Phaser.Scene {
     w.clear();
     this.spriteIdx = 0;
     this.labelIdx = 0;
+    // board-reveal intro: 0 before START, ramps to 1 over INTRO_MS once the run begins
+    this.intro = this.model.started ? Math.min(1, (this.clock - this.runBeganAt) / INTRO_MS) : 0;
+    const revealed = this.model.started; // obstacles / terminal / queue / hints stay hidden pre-start
 
     const topRow = Math.max(0, Math.floor(this.scrollPx / CELL) - 1);
     const botRow = topRow + this.visRows + 2;
@@ -783,14 +797,23 @@ export class GameScene extends Phaser.Scene {
           w.fillRect(x, y, CELL, CELL);
         }
         const coord = { row: r, col: c };
+        const cx = x + CELL / 2;
+        const cy = y + CELL / 2;
         const cell = this.model.grid.get(coord);
+        // The source (manhole) and the player's own pipes are always drawn. Everything seeded —
+        // clogs, power markers, the fatberg, the destination — is part of the BOARD and stays
+        // hidden until START, then spins/pops in (see the intro helpers).
         if (cell?.type === "fatberg") {
-          fatbergCells.push(coord);
+          if (revealed) fatbergCells.push(coord);
+        } else if (cell?.type === "blocker") {
+          if (revealed) this.drawClogIntro(w, cx, cy, cell, coord);
+        } else if (cell?.type === "terminal") {
+          if (revealed && this.cellIntro(coord) > 0) this.drawCell(w, cx, cy, cell, coord);
         } else if (cell) {
-          this.drawCell(w, x + CELL / 2, y + CELL / 2, cell, coord);
+          this.drawCell(w, cx, cy, cell, coord);
         } else {
           const marker = this.model.powerMarkerAt(coord);
-          if (marker) this.drawPowerMarker(w, x + CELL / 2, y + CELL / 2, marker.power, marker.mag);
+          if (marker && revealed) this.drawPowerMarkerIntro(w, cx, cy, marker, coord);
         }
       }
     }
@@ -798,13 +821,16 @@ export class GameScene extends Phaser.Scene {
     for (const c of fatbergCells) {
       const isBerg = (dr: number, dc: number) =>
         this.model.grid.get({ row: c.row + dr, col: c.col + dc })?.type === "fatberg";
+      const ci = this.cellIntro(c);
+      if (ci <= 0) continue; // not yet revealed
+      const sc = easeOutBack(ci); // scale-pop the boss in
       if (haveBergSprite) {
         if (isBerg(-1, 0) || isBerg(0, -1)) continue; // one sprite, drawn at the 2x2 anchor
         const ccx = c.col * CELL + CELL; // centre of the 2x2 block
         const ccy = this.rowScreenY(c.row) + CELL;
         w.fillStyle(0x000000, 0.16);
-        w.fillEllipse(ccx, ccy + CELL * 0.85, CELL * 1.5, CELL * 0.3); // ground shadow
-        this.useSprite("fatberg", ccx, ccy, CELL * 2.2, Z_GRID_SPRITE + 1);
+        w.fillEllipse(ccx, ccy + CELL * 0.85, CELL * 1.5 * sc, CELL * 0.3 * sc); // ground shadow
+        this.useSprite("fatberg", ccx, ccy, CELL * 2.2 * sc, Z_GRID_SPRITE + 1);
       } else {
         this.drawFatbergCell(w, c.col * CELL + CELL / 2, this.rowScreenY(c.row) + CELL / 2, c);
       }
@@ -922,6 +948,85 @@ export class GameScene extends Phaser.Scene {
     if (fuse !== undefined) this.drawDynamite(g, cx, cy, fuse);
   }
 
+  /** Per-cell board-reveal progress (0 hidden -> 1 settled). Settles LEFT -> RIGHT with a little
+   *  row jitter, so columns land at different times (not all in unison). The last column's spin
+   *  finishes exactly at intro=1. 0 before START; 1 once the intro is done (steady state). */
+  private cellIntro(coord: Coord): number {
+    if (!this.model.started) return 0;
+    if (this.intro >= 1) return 1;
+    const cols = Math.max(1, CONFIG.cols - 1);
+    const stagger = (coord.col / cols) * 0.5 + ((coord.row % 4) / 4) * 0.05; // ≤0.55 start delay
+    return Math.max(0, Math.min(1, (this.intro - stagger) / 0.45)); // 0.55 + 0.45 = 1.0
+  }
+
+  /** Fruit-machine reel slots for a revealing tile: 1-2 symbols sliding UP and decelerating, the
+   *  real one (i=0) landing dead-centre. Alpha-windowed at the cell edges so it needs no mask. */
+  private reelSlots(ci: number): { i: number; dy: number; fade: number }[] {
+    const eased = 1 - Math.pow(1 - ci, 3); // ease-out momentum
+    const s = 9 * (1 - eased); // scroll distance in symbols, slowing to 0 (the target)
+    const out: { i: number; dy: number; fade: number }[] = [];
+    for (let i = Math.floor(s) - 1; i <= Math.floor(s) + 1; i++) {
+      if (i < 0) continue;
+      const dy = (s - i) * CELL; // i==0 -> centred as s->0
+      const fade = Math.max(0, 1 - Math.abs(dy) / (CELL * 0.6));
+      if (fade > 0.02) out.push({ i, dy, fade });
+    }
+    return out;
+  }
+
+  /** A clog revealing itself: the unflushable spins through the junk types like a fruit-machine
+   *  reel (smooth vertical slide, decelerating) before settling on the one it'll actually be. */
+  private drawClogIntro(g: G, cx: number, cy: number, cell: Cell, coord: Coord): void {
+    const ci = this.cellIntro(coord);
+    if (ci <= 0) return; // not yet revealed
+    if (ci >= 1) {
+      this.drawCell(g, cx, cy, cell, coord); // settled — the real clog
+      return;
+    }
+    // muck mound base (stationary "machine" frame)
+    g.fillStyle(0x000000, 0.22);
+    g.fillEllipse(cx, cy + CELL * 0.36, CELL * 0.62, CELL * 0.14);
+    g.fillStyle(COLORS.clog, 1);
+    g.fillCircle(cx, cy + CELL * 0.05, CELL * 0.38);
+    g.fillCircle(cx - CELL * 0.22, cy + CELL * 0.18, CELL * 0.2);
+    g.fillCircle(cx + CELL * 0.22, cy + CELL * 0.16, CELL * 0.19);
+    // reel the junk glyph through the unflushables, landing on the real one
+    for (const { i, dy, fade } of this.reelSlots(ci)) {
+      const idx = ((i % JUNK_TYPES.length) + JUNK_TYPES.length) % JUNK_TYPES.length;
+      const junk = i === 0 ? cell.junk : JUNK_TYPES[idx];
+      const hd = `junk-${junk}-hd`;
+      const key = this.textures.exists(hd) ? hd : `junk-${junk}`;
+      this.useSprite(key, cx, cy + dy - CELL * 0.02, CELL * 0.56, Z_GRID_SPRITE, 0, { alpha: fade });
+    }
+  }
+
+  /** A power marker revealing itself: the box settles into place while its glyph reels in, same
+   *  fruit-machine motion as the clogs and the next-piece indicator. */
+  private drawPowerMarkerIntro(
+    g: G,
+    cx: number,
+    cy: number,
+    marker: { power: PowerType; mag: number },
+    coord: Coord,
+  ): void {
+    const ci = this.cellIntro(coord);
+    if (ci <= 0) return;
+    if (ci >= 1) {
+      this.drawPowerMarker(g, cx, cy, marker.power, marker.mag);
+      return;
+    }
+    const s = CELL * 0.34;
+    g.fillStyle(0x000000, 0.16);
+    g.fillEllipse(cx, cy + CELL * 0.33, s * 1.7, s * 0.45); // shadow
+    g.fillStyle(COLORS.speed, 0.22);
+    g.fillRoundedRect(cx - s, cy - s, s * 2, s * 2, 8); // box (stationary frame)
+    g.lineStyle(3, COLORS.speed, 0.95);
+    g.strokeRoundedRect(cx - s, cy - s, s * 2, s * 2, 8);
+    for (const { dy, fade } of this.reelSlots(ci)) {
+      this.drawPowerBadge(g, cx, cy - s * 0.18 + dy, marker.power, s * 0.72, Z_GRID_SPRITE + 1, fade);
+    }
+  }
+
   /** 0..1 draw-in progress for a freshly placed pipe (1 = fully drawn). */
   private pipeGrow(coord: Coord): number {
     const key = `${coord.row},${coord.col}`;
@@ -938,6 +1043,7 @@ export class GameScene extends Phaser.Scene {
   /** Pulsing sonar rings around the treatment works so it's obviously the target. */
   private drawTerminalBeacon(g: G): void {
     const t = this.model.terminal;
+    if (this.cellIntro(t) < 1) return; // the destination's pings start once it has settled in
     const cx = t.col * CELL + CELL / 2;
     const cy = this.rowScreenY(t.row) + CELL / 2;
     const gridBottom = this.pondTop;
@@ -987,10 +1093,10 @@ export class GameScene extends Phaser.Scene {
     g.fillCircle(cx, cy, CELL * 0.13);
   }
 
-  private drawPowerBadge(g: G, cx: number, cy: number, power: PowerType, r: number, depth: number): void {
+  private drawPowerBadge(g: G, cx: number, cy: number, power: PowerType, r: number, depth: number, alpha = 1): void {
     // the faucet sits directly on the tile — no disc behind it
     const key = POWER_SPRITE[power];
-    if (this.useSprite(key, cx, cy, r * 2.1, depth)) return;
+    if (this.useSprite(key, cx, cy, r * 2.1, depth, 0, { alpha })) return;
 
     // Fallback only (if the sprite failed to load): a plain disc + glyph.
     g.fillStyle(0x0c0b0a, 1);
@@ -1370,6 +1476,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private drawBuildHints(): void {
+    if (this.intro < 0.85) return; // position indicators come up last, once the board has revealed
     const leakSet = new Set(this.model.leakTargets.map((c) => `${c.row},${c.col}`));
     const onScreen = (y: number) => y >= HUD_H - CELL && y <= this.pondTop;
     for (const { cell: t, dir } of this.model.buildFrontier) {
@@ -1467,6 +1574,7 @@ export class GameScene extends Phaser.Scene {
     this.reelGfx.clear(); // masked reel layer — redrawn only while spinning
     this.reelGfx.clearMask(); // default: no mask (no per-frame stencil cost when idle)
     if (m.state === "WON" || m.state === "GAMEOVER") return; // hide once the level's over
+    if (!m.started) return; // no next-piece box until the run begins
 
     const front = m.currentPiece;
     if (front !== this.prevFront) {
@@ -1478,7 +1586,8 @@ export class GameScene extends Phaser.Scene {
     const spinning = age < ROULETTE_MS;
 
     const box = 92;
-    const cy = box / 2 + 10; // fixed at the top
+    let cy = box / 2 + 10; // fixed at the top
+    if (this.intro < 1) cy -= (1 - easeOutBack(this.intro)) * (box + 70); // slides down into view
     // sits top-left, but slides to the right when you're building behind it
     const left = box / 2 + 10;
     const right = GAME_WIDTH - box / 2 - 10;
