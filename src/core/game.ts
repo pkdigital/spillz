@@ -84,6 +84,10 @@ export const CONFIG = {
   fishPoints: 500, // points per fish rescued
   purityBonusMax: 8000, // bonus for a perfectly pristine pond (scales with final quality)
 
+  // --- bucket-1 powers ---
+  scorePower: 1000, // bonus points a score marker grants (× its 2/3/4 magnitude)
+  freezeMs: 3500, // how long a freeze marker pauses the flow
+
   // --- bosses: the fatberg + the dynamite that clears it ---
   /** First level a fatberg boss can appear. */
   fatbergFromLevel: 3,
@@ -121,6 +125,11 @@ export class Game {
 
   /** Tug-of-war meter: 1 = pristine water, 0 = pond dead / shareholders win. */
   balance: number = CONFIG.startBalance;
+  /** Permanent (monotonic) dead-fish count — a high-water-mark. Quality (`balance`) can recover,
+   *  but the dead stay dead: poison kills directly, and a quality dip kills any fish it implies. */
+  private deadFish = 0;
+  /** While `elapsed < frozenUntil`, the flow is paused (a freeze marker). */
+  private frozenUntil = 0;
   /** Cosmetic running shareholder-profit figure (£). */
   profitPounds = 0;
   /** Open ends currently spilling (empty while contained). */
@@ -214,10 +223,29 @@ export class Game {
     return this.fishKindsArr;
   }
 
-  /** Fish that have died (float belly-up) — they start dying past a half-full pond. */
+  /** Dead fish (permanent). Fish start dying once quality drops past half; this is the
+   *  high-water-mark of those deaths plus any direct kills (poison), and never decreases. */
   get fishDead(): number {
+    return this.deadFish;
+  }
+
+  /** How many fish the CURRENT quality would have killed (drives the high-water-mark). The last
+   *  fish only dies when quality hits exactly 0, so "all dead" stays in lock-step with a dead pond
+   *  (rounding could otherwise show every fish gone while a sliver of quality remained). */
+  private balanceDeadCount(): number {
     const q = this.balance;
-    return q >= 0.5 ? 0 : Math.round(((0.5 - q) / 0.5) * this.levelFish);
+    if (q <= 0) return this.levelFish;
+    if (q >= 0.5) return 0;
+    return Math.min(this.levelFish - 1, Math.round(((0.5 - q) / 0.5) * this.levelFish));
+  }
+
+  /** Kill one more fish outright (poison / dev) — permanent; the pond dies if it was the last. */
+  private killOneFish(): void {
+    this.deadFish = Math.min(this.levelFish, this.deadFish + 1);
+    if (this.deadFish >= this.levelFish) {
+      this.balance = 0;
+      this.state = "GAMEOVER";
+    }
   }
 
   /** Fish still alive in the pond right now. */
@@ -235,14 +263,9 @@ export class Game {
     return Math.round(this.balance * CONFIG.purityBonusMax);
   }
 
-  /** Dev helper: drop the quality meter just enough to kill one more fish. */
+  /** Dev helper: kill one more fish (permanently). */
   killFish(): void {
-    const next = this.fishDead + 1;
-    if (next >= this.levelFish) {
-      this.balance = 0; // last fish -> pond dies
-      return;
-    }
-    this.balance = Math.max(0, 0.5 - (next / this.levelFish) * 0.5);
+    this.killOneFish();
   }
 
   get score(): number {
@@ -262,6 +285,11 @@ export class Game {
   /** ms remaining on the start countdown (0 once flowing). */
   get countdownRemaining(): number {
     return Math.max(0, CONFIG.countdownMs - this.elapsed);
+  }
+
+  /** Whether a freeze marker currently has the flow paused (for the scene's ice overlay). */
+  get frozen(): boolean {
+    return this.state === "FLOWING" && this.elapsed < this.frozenUntil;
   }
 
   /** The piece the player will place next (front of queue). */
@@ -603,6 +631,14 @@ export class Game {
     this.elapsed += dtMs;
     this.tickFuses(dtMs);
 
+    // FREEZE: while the flow is paused, slide the flow timeline forward with elapsed so the front
+    // holds exactly where it is (fillProgress = (elapsed-ringStart)/flowMs stays put) and no ring
+    // ticks. Countdown is unaffected — freeze only ever fires once the sewage is already flowing.
+    if (this.state === "FLOWING" && this.elapsed < this.frozenUntil) {
+      this.ringStart += dtMs;
+      this.nextFlowAt += dtMs;
+    }
+
     if (this.state === "COUNTDOWN") {
       if (this.elapsed < CONFIG.countdownMs) return;
       this.state = "FLOWING";
@@ -790,6 +826,15 @@ export class Game {
         this.adjustBalance(CONFIG.protestBoost);
         this.profitPounds = Math.max(0, this.profitPounds - CONFIG.protestPounds);
         break;
+      case "score":
+        this.runScore += CONFIG.scorePower * mag; // 2x / 3x / 4x bonus points
+        break;
+      case "freeze":
+        this.frozenUntil = this.elapsed + CONFIG.freezeMs; // pause the flow a few seconds
+        break;
+      case "poison":
+        this.killOneFish(); // a fish dies instantly
+        break;
     }
     this.events.push({ kind: "power", power, coord: c });
     const cell = this.grid.get(c);
@@ -805,6 +850,8 @@ export class Game {
 
   private adjustBalance(delta: number): void {
     this.balance = Math.max(0, Math.min(1, this.balance + delta));
-    if (this.balance <= 0) this.state = "GAMEOVER"; // pond dead
+    // raise the permanent dead-fish count to whatever this quality implies (never lower it)
+    this.deadFish = Math.min(this.levelFish, Math.max(this.deadFish, this.balanceDeadCount()));
+    if (this.balance <= 0 || this.deadFish >= this.levelFish) this.state = "GAMEOVER"; // pond dead
   }
 }

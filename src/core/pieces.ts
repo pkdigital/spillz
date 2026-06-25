@@ -43,12 +43,26 @@ export const PLACEABLE_PIECES: PieceType[] = [
   "bend-sw",
 ];
 
-export const POWER_TYPES: PowerType[] = ["speed-up"]; // the faucet always speeds the flow up
+export const POWER_TYPES: PowerType[] = ["speed-up", "score", "freeze", "poison"];
+
+/** Relative odds a seeded board marker is each power. Faucet stays common; the hazard (poison)
+ *  and the helpers are rarer treats. (More powers land here as buckets 2-3 get built.) */
+const POWER_WEIGHTS: [PowerType, number][] = [
+  ["speed-up", 4],
+  ["score", 2],
+  ["freeze", 2],
+  ["poison", 2],
+];
 
 export const JUNK_TYPES: JunkType[] = ["condom", "wet-wipes", "cotton-buds", "sanitary-pad"];
 
 export function randomPower(rng: () => number = Math.random): PowerType {
-  return POWER_TYPES[Math.floor(rng() * POWER_TYPES.length)];
+  const total = POWER_WEIGHTS.reduce((s, [, w]) => s + w, 0);
+  let r = rng() * total;
+  for (const [p, w] of POWER_WEIGHTS) {
+    if ((r -= w) < 0) return p;
+  }
+  return "speed-up";
 }
 
 export function randomJunk(rng: () => number = Math.random): JunkType {

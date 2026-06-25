@@ -69,6 +69,19 @@ const POWER_SPRITE: Record<PowerType, string> = {
   "speed-up": "power-faucet",
   "speed-down": "power-faucet",
   protest: "power-fist",
+  score: "power-star",
+  freeze: "power-snowflake",
+  poison: "power-poison",
+};
+
+/** Marker frame colour — good powers read friendly, the poison hazard reads as a warning. */
+const POWER_TINT: Record<PowerType, number> = {
+  "speed-up": 0x6fd3ff,
+  "speed-down": 0x6fd3ff,
+  protest: 0x9be15d,
+  score: 0xffd24a,
+  freeze: 0x8fe3ff,
+  poison: 0xff5c5c,
 };
 
 const TOAST_MS = 1700;
@@ -298,6 +311,9 @@ export class GameScene extends Phaser.Scene {
     }
     this.load.svg("power-faucet", "assets/power/faucet.svg", { width: 72, height: 72 });
     this.load.svg("power-fist", "assets/power/fist.svg", { width: 48, height: 48 });
+    this.load.svg("power-star", "assets/power/star.svg", { width: 64, height: 64 });
+    this.load.svg("power-snowflake", "assets/power/snowflake.svg", { width: 64, height: 64 });
+    this.load.svg("power-poison", "assets/power/poison.svg", { width: 64, height: 64 });
     this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 256, height: 256 });
     this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
     this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
@@ -555,7 +571,7 @@ export class GameScene extends Phaser.Scene {
     // Advance the flow-texture phase at exactly the speed the sewage front moves (one CELL
     // per ring). Accumulated (not clock×rate) so a rate change — superflow, speed powers —
     // changes future drift without teleporting every speck.
-    this.flowPhase += deltaMs * (CELL / Math.max(1, this.model.ringFlowMs));
+    if (!this.model.frozen) this.flowPhase += deltaMs * (CELL / Math.max(1, this.model.ringFlowMs));
     // Hold the countdown while the board is still revealing (obstacles reeling in). The reveal is
     // a pure scene animation; the game proper only begins once every tile has settled.
     const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
@@ -582,6 +598,7 @@ export class GameScene extends Phaser.Scene {
     for (const e of this.model.consumeEvents()) {
       if (e.kind === "clog") this.spawnJunkDrop(e);
       else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
+      else if (e.kind === "power" && e.power) this.onPowerFired(e.power);
     }
 
     // Llamatron-style instruction banners + board-reveal intro kick-off
@@ -868,6 +885,7 @@ export class GameScene extends Phaser.Scene {
 
     const u = this.gfxUi;
     u.clear();
+    this.renderFreeze(u); // icy tint over the grid while the flow is paused
     this.renderPond(u);
     this.renderHud(u);
     this.renderQueue(u); // after the HUD so the top-left box sits on top of it
@@ -1600,7 +1618,7 @@ export class GameScene extends Phaser.Scene {
    * (green = build through it, red = avoid) with the power icon floating inside.
    */
   private drawPowerMarker(g: G, cx: number, cy: number, power: PowerType, mag = 1): void {
-    const col = COLORS.speed; // the faucet speeds the flow up
+    const col = POWER_TINT[power]; // good = friendly, poison = red warning
     const phase = cx * 0.05;
     const bob = Math.sin(this.clock / 320 + phase) * 5;
     const py = cy + bob;
@@ -1614,11 +1632,13 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(3, col, 0.95);
     g.strokeRoundedRect(cx - s, py - s, s * 2, s * 2, 8); // ...bright frame
 
-    // the tap pulses so it draws the eye (no sweeping glint line)
+    // the icon pulses so it draws the eye (no sweeping glint line)
     const pulse = 1 + 0.12 * Math.sin(this.clock / 200);
     this.drawPowerBadge(g, cx, py - s * 0.18, power, s * 0.72 * pulse, Z_GRID_SPRITE + 1);
-    // how much it speeds the flow up: 2x / 3x / 4x
-    this.useLabel(`${mag}x`, cx, py + s * 0.62, Z_GRID_SPRITE + 2, 13);
+    // the 2x/3x/4x magnitude only means something for the multiplier powers
+    if (power === "speed-up" || power === "speed-down" || power === "score") {
+      this.useLabel(`${mag}x`, cx, py + s * 0.62, Z_GRID_SPRITE + 2, 13);
+    }
   }
 
   /** A pooled text label positioned at a world point (e.g. a faucet's 2x/3x/4x tag). */
@@ -1778,6 +1798,32 @@ export class GameScene extends Phaser.Scene {
 
   private queueBanner(lines: string[], hold: number): void {
     this.bannerQueue.push({ lines, hold });
+  }
+
+  /** A power tile just fired: pop a labelled toast (the model already applied the effect). */
+  private onPowerFired(power: PowerType): void {
+    const LABELS: Record<PowerType, string> = {
+      "speed-up": "FLOW SURGE!",
+      "speed-down": "FLOW EASED",
+      protest: "PROTEST!",
+      score: "EXTRA SCORE!",
+      freeze: "FLOW FROZEN!",
+      poison: "FISH POISONED!",
+    };
+    this.toast = { label: LABELS[power], icon: POWER_SPRITE[power], start: this.clock };
+  }
+
+  /** Icy wash over the grid while a freeze marker holds the flow paused. */
+  private renderFreeze(g: G): void {
+    if (!this.model.frozen) return;
+    const top = HUD_H;
+    const bot = this.pondTop;
+    const a = 0.16 + 0.06 * Math.sin(this.clock / 200);
+    g.fillStyle(0x8fe3ff, a);
+    g.fillRect(0, top, GAME_WIDTH, bot - top);
+    g.fillStyle(0xffffff, 0.06); // frost lines at the band edges
+    g.fillRect(0, top, GAME_WIDTH, 5);
+    g.fillRect(0, bot - 5, GAME_WIDTH, 5);
   }
 
   /** Big arcade instruction flash (Llamatron-style): pops in, holds, fades; queued so several

@@ -32,7 +32,13 @@ export type PieceType =
   | "fatberg"; // a giant multi-tile clog boss; can't build through, must blow it up
 
 /** Power effects that fire once when sewage flows through the tile. */
-export type PowerType = "speed-up" | "speed-down" | "protest";
+export type PowerType =
+  | "speed-up"
+  | "speed-down"
+  | "protest"
+  | "score" // bonus points (good)
+  | "freeze" // pauses the flow for a few seconds (good — breathing room)
+  | "poison"; // drops into the pond and kills a fish instantly (hazard)
 
 /** Themed clog variants (cosmetic) for blocker tiles — the unflushables. */
 export type JunkType = "condom" | "wet-wipes" | "cotton-buds" | "sanitary-pad";
