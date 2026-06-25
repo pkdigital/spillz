@@ -146,37 +146,42 @@ describe("bosses: fatberg + dynamite", () => {
   });
 });
 
-describe("treatment works (level win)", () => {
-  it("constructs deeper levels without error (next-level path)", () => {
+describe("sewer overflow (level win)", () => {
+  it("constructs deeper levels without error, with a bigger overflow each level", () => {
+    let prev = 0;
     for (const lvl of [2, 3, 5, 8]) {
       const g = new Game(undefined, lvl);
       expect(g.level).toBe(lvl);
-      expect(g.terminal.row).toBeGreaterThan(0);
+      expect(g.overflowTotal).toBeGreaterThan(prev); // bigger dump each level
+      prev = g.overflowTotal;
       expect(g.queue.length).toBeGreaterThan(0);
       g.update(100); // a tick on a fresh deeper level shouldn't throw
     }
   });
 
-  it("detects a finished pipe connection to the works (triggers super-speed)", () => {
+  it("tracks how much of the overflow is contained as the sewage flows", () => {
     const g = new Game();
-    expect(g.isConnectedToTerminal()).toBe(false);
-    for (let r = 1; r < g.terminal.row; r++) {
-      g.grid.set({ row: r, col: CONFIG.sourceCol }, "straight-v");
-    }
-    expect(g.isConnectedToTerminal()).toBe(true);
-  });
-
-  it("wins the level when the sewage reaches the terminal", () => {
-    const g = new Game();
-    // force a clean straight column from under the toilet down to the terminal
-    // (grid.set overwrites any seeded obstacle, so the path is guaranteed)
-    for (let r = 1; r < g.terminal.row; r++) {
+    expect(g.overflowContained).toBe(0);
+    for (let r = 1; r <= g.overflowTotal + 2; r++) {
       g.grid.set({ row: r, col: CONFIG.sourceCol }, "straight-v");
     }
     g.update(CONFIG.countdownMs); // start + source fills
-    // run the flood down the column to the treatment works
-    for (let i = 0; i < g.terminal.row + 2; i++) g.update(CONFIG.flowIntervalMs);
+    g.update(CONFIG.flowIntervalMs); // a couple of segments fill
+    g.update(CONFIG.flowIntervalMs);
+    expect(g.overflowContained).toBeGreaterThan(0);
+    expect(g.overflowPct).toBeGreaterThan(0);
+  });
+
+  it("wins the level once the whole overflow is contained", () => {
+    const g = new Game();
+    // a clean straight column long enough to divert the entire overflow
+    for (let r = 1; r <= g.overflowTotal + 2; r++) {
+      g.grid.set({ row: r, col: CONFIG.sourceCol }, "straight-v");
+    }
+    g.update(CONFIG.countdownMs); // start + source fills
+    for (let i = 0; i < g.overflowTotal + 4; i++) g.update(CONFIG.flowIntervalMs);
     expect(g.state).toBe("WON");
+    expect(g.overflowContained).toBeGreaterThanOrEqual(g.overflowTotal);
   });
 });
 

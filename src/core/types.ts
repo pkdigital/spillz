@@ -73,6 +73,8 @@ export interface FlowEvent {
   power?: PowerType;
   /** Where it happened (so the scene can drop the junk from that tile into the pond). */
   coord: Coord;
+  /** Payload for the effect — e.g. the bonus points a score marker awarded. */
+  value?: number;
 }
 
 /** Top-level run state machine. WON = sewage reached the treatment works. */

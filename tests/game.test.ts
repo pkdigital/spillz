@@ -88,10 +88,9 @@ describe("Game state machine", () => {
 
   it("survives longer when a valid path is built", () => {
     const g = new Game();
-    // Build a straight vertical run down the source column, but stop short of the
-    // works (leave a gap) so it isn't a completed connection — we just want to see
-    // the flow advance over a built column while staying FLOWING.
-    for (let r = 1; r < g.terminal.row - 1; r++) {
+    // Build a short straight run down the source column — far less than the overflow
+    // quota — so the flow advances over a built column while staying FLOWING (not yet won).
+    for (let r = 1; r < 6; r++) {
       g.grid.place({ row: r, col: CONFIG.sourceCol }, "straight-v");
     }
     g.update(CONFIG.countdownMs); // source fills

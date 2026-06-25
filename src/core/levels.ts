@@ -1,7 +1,9 @@
 // ---- Difficulty curve (all progression knobs live here) --------------------
 //
-// A "level" is now a run from the toilet (top) to the treatment works (bottom).
-// `level` is the 1-based run number; reaching the terminal advances it.
+// A "level" is a single sewer OVERFLOW — a finite dump the water company spills.
+// You win by containing the whole overflow (diverting `overflowFor(level)` segments
+// of sewage through pipe) before the pond dies. `level` is the 1-based run number;
+// each deeper level is a bigger dump. Fish saved at the end is the grade.
 
 /**
  * Length of the guaranteed-connectable opening backbone. The first ~20 placeable
@@ -13,11 +15,11 @@ export const OPENING_PATH_LEN = 20;
 /** Length of each connectable continuation chunk after the opening. */
 export const CHUNK_PATH_LEN = 12;
 
-/** Grid row of the treatment works for a level — deeper each level. */
-export const TERMINAL_BASE_ROW = 9;
-export const TERMINAL_ROW_STEP = 3;
-export function terminalRow(level: number): number {
-  return TERMINAL_BASE_ROW + (level - 1) * TERMINAL_ROW_STEP;
+/** Size of the overflow to contain (segments of sewage diverted) — bigger each level. */
+export const OVERFLOW_BASE = 16;
+export const OVERFLOW_STEP = 6;
+export function overflowFor(level: number): number {
+  return OVERFLOW_BASE + (level - 1) * OVERFLOW_STEP;
 }
 
 /** First row that can hold a clog obstacle (keeps the opening clean). */

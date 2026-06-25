@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import factsData from "../../data/facts.json";
 import { CONFIG, Game } from "../core/game";
 import { PIECE_OPENINGS, sidesOf, JUNK_TYPES } from "../core/pieces";
 import {
@@ -194,12 +195,14 @@ function lerpColor(a: number, b: number, t: number): number {
 // the poo runs from mustard-yellow through to dark brown, varied per segment
 const SEWAGE_YELLOW = 0xcaa53e;
 const SEWAGE_BROWN = 0x5c3c19;
+const FROZEN_TINT = 0x6fd6c8; // icy greeny-blue the poo takes on while a freeze is active
 
 // fish species palette — picked per fish so each level's pond looks different
 const FISH_COLORS = [0x9be15d, 0xffb347, 0x6fd3ff, 0xff8da3, 0xc792ea, 0xf6e05e];
 
 const PLACE_ANIM_MS = 170;
 const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
+const FACTS: { fact: string; source: string }[] = factsData.facts;
 
 /** Ease-out with a little overshoot — the "ta-da" pop. */
 function easeOutBack(t: number): number {
@@ -255,6 +258,8 @@ export class GameScene extends Phaser.Scene {
   private blastBits: { x: number; y: number; vx: number; vy: number; r: number; color: number; born: number; life: number }[] = [];
   /** Rising smoke puffs after a blast. */
   private smokePuffs: { x: number; y: number; vy: number; r: number; born: number; life: number }[] = [];
+  /** Floating "+N BONUS" score pops that rise and fade (score markers). */
+  private scorePops: { x: number; y: number; value: number; born: number }[] = [];
   /** Hit-rect of the end-of-level dialog button (null when no dialog is shown). */
   private endButton: { x: number; y: number; w: number; h: number } | null = null;
   /** Hit-rect of the pre-run Start button (null once the run has begun). */
@@ -267,6 +272,8 @@ export class GameScene extends Phaser.Scene {
   private dragging = false;
   private manualScrollUntil = 0;
   private buttonText!: Phaser.GameObjects.Text;
+  /** A real UK water-pollution fact shown on each level's start popup. */
+  private factText!: Phaser.GameObjects.Text;
   // SNES-style level-clear tally (count-up + beeps)
   private tallyStart = 0;
   private tallyFishCounted = 0;
@@ -286,6 +293,7 @@ export class GameScene extends Phaser.Scene {
   /** One-time hints already shown THIS RUN (survives level restarts via the scene data). */
   private seenHints = new Set<string>();
   private prevStarted = false;
+  private devPowerIdx = 0; // dev "P" key cycles through the power types
 
   /** Pooled sprite images, re-used each frame. */
   private sprites: Phaser.GameObjects.Image[] = [];
@@ -309,11 +317,12 @@ export class GameScene extends Phaser.Scene {
       this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 72, height: 72 });
       this.load.image(`junk-${j}-hd`, `assets/junk/${j}.png`); // drop a PNG to override
     }
-    this.load.svg("power-faucet", "assets/power/faucet.svg", { width: 72, height: 72 });
-    this.load.svg("power-fist", "assets/power/fist.svg", { width: 48, height: 48 });
-    this.load.svg("power-star", "assets/power/star.svg", { width: 64, height: 64 });
-    this.load.svg("power-snowflake", "assets/power/snowflake.svg", { width: 64, height: 64 });
-    this.load.svg("power-poison", "assets/power/poison.svg", { width: 64, height: 64 });
+    // tight-trimmed PNGs (the SVGs sat off-centre in their square viewBoxes)
+    this.load.image("power-faucet", "assets/power/faucet.png");
+    this.load.image("power-fist", "assets/power/fist.png");
+    this.load.image("power-star", "assets/power/star.png");
+    this.load.image("power-snowflake", "assets/power/snowflake.png");
+    this.load.image("power-poison", "assets/power/poison.png");
     this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 256, height: 256 });
     this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
     this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
@@ -352,6 +361,7 @@ export class GameScene extends Phaser.Scene {
     this.explosions = [];
     this.blastBits = [];
     this.smokePuffs = [];
+    this.scorePops = [];
     this.endButton = null;
     this.startButton = null;
     this.tallyStart = 0;
@@ -374,14 +384,14 @@ export class GameScene extends Phaser.Scene {
 
     // level indicator — a top-right overlay (no black HUD box anymore)
     this.statusText = this.add
-      .text(GAME_WIDTH - 12, 12, "", {
+      .text(GAME_WIDTH / 2 - 18, 8, "", {
         fontFamily: ARCADE_FONT,
         fontSize: "13px",
         color: COLORS.text,
-        align: "right",
-        lineSpacing: 6,
+        align: "center",
+        lineSpacing: 5,
       })
-      .setOrigin(1, 0)
+      .setOrigin(0.5, 0)
       .setDepth(Z_TEXT);
     this.centerText = this.add
       .text(GAME_WIDTH / 2, (CONFIG.rows * CELL) / 2, "", {
@@ -401,6 +411,20 @@ export class GameScene extends Phaser.Scene {
     this.toastText = this.add
       .text(0, 0, "", { fontFamily: ARCADE_FONT, fontSize: "13px", color: COLORS.text })
       .setOrigin(0, 0.5)
+      .setDepth(Z_TEXT)
+      .setVisible(false);
+    this.factText = this.add
+      .text(GAME_WIDTH / 2, 0, "", {
+        fontFamily: ARCADE_FONT,
+        fontSize: "10px",
+        color: "#bfe0c4",
+        align: "center",
+        lineSpacing: 5,
+        wordWrap: { width: 360 },
+        stroke: "#06101a",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5, 0)
       .setDepth(Z_TEXT)
       .setVisible(false);
     this.bannerText = this.add
@@ -425,7 +449,7 @@ export class GameScene extends Phaser.Scene {
     this.input.on("pointerdown", this.onDown, this);
     this.input.on("pointermove", this.onMove, this);
     this.input.on("pointerup", this.onUp, this);
-    // dev shortcuts: N = skip to next level (reach the fatberg on L3+); D = kill a fish
+    // dev shortcuts: N = next level; D = kill a fish; P = fire the next power (cycles)
     this.input.keyboard?.on("keydown-N", () => {
       this.pendingRestart = {
         level: this.model.level + 1,
@@ -435,6 +459,12 @@ export class GameScene extends Phaser.Scene {
       };
     });
     this.input.keyboard?.on("keydown-D", () => this.model.killFish());
+    this.input.keyboard?.on("keydown-P", () => {
+      const cycle: PowerType[] = ["score", "freeze", "poison", "speed-up"];
+      const power = cycle[this.devPowerIdx % cycle.length];
+      this.devPowerIdx++;
+      this.model.devFirePower(power);
+    });
   }
 
   /** Lazily create + unlock the WebAudio context on the first user gesture. */
@@ -528,7 +558,7 @@ export class GameScene extends Phaser.Scene {
 
   /** How far down the player may pan — a few rows past the deepest action. */
   private maxScroll(): number {
-    const deepest = Math.max(this.model.buildRow, this.model.frontRow, this.model.terminal.row);
+    const deepest = Math.max(this.model.buildRow, this.model.frontRow);
     return Math.max(0, (deepest - this.visRows + 4) * CELL);
   }
 
@@ -598,6 +628,7 @@ export class GameScene extends Phaser.Scene {
     for (const e of this.model.consumeEvents()) {
       if (e.kind === "clog") this.spawnJunkDrop(e);
       else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
+      else if (e.kind === "power" && e.power === "score") this.spawnScorePop(e.coord, e.value ?? 0);
       else if (e.kind === "power" && e.power) this.onPowerFired(e.power);
     }
 
@@ -831,8 +862,6 @@ export class GameScene extends Phaser.Scene {
           if (revealed) fatbergCells.push(coord);
         } else if (cell?.type === "blocker") {
           if (revealed) this.drawClogIntro(w, cx, cy, cell, coord);
-        } else if (cell?.type === "terminal") {
-          if (revealed && this.cellIntro(coord) > 0) this.drawCell(w, cx, cy, cell, coord);
         } else if (cell) {
           this.drawCell(w, cx, cy, cell, coord);
         } else {
@@ -860,7 +889,6 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    this.drawTerminalBeacon(w);
     this.drawBuildHints();
 
     const ringStart = this.model.ringStart;
@@ -893,6 +921,7 @@ export class GameScene extends Phaser.Scene {
     this.renderJunkDrops();
     this.renderConfetti(u);
     this.renderToast(u);
+    this.renderScorePops(); // rising "+N BONUS" stars
     this.renderBanner(); // big instruction flash (hidden behind the end/start cards)
     this.renderEndDialog(u); // modal card, drawn on top of everything
     this.renderStartOverlay(u); // pre-run Start screen (mutually exclusive with the end card)
@@ -1063,30 +1092,6 @@ export class GameScene extends Phaser.Scene {
       return 1;
     }
     return 1 - Math.pow(1 - p, 3); // ease-out: arms shoot out from the centre
-  }
-
-  /** Pulsing sonar rings around the treatment works so it's obviously the target. */
-  private drawTerminalBeacon(g: G): void {
-    const t = this.model.terminal;
-    if (this.cellIntro(t) < 1) return; // the destination's pings start once it has settled in
-    const cx = t.col * CELL + CELL / 2;
-    const cy = this.rowScreenY(t.row) + CELL / 2;
-    const gridBottom = this.pondTop;
-
-    if (cy >= HUD_H - CELL && cy <= gridBottom + CELL) {
-      // on-screen: map-hotspot pings (bright-blue rings) around the plughole
-      const maxR = CELL * 1.7;
-      for (let k = 0; k < 3; k++) {
-        const phase = (this.clock / 1200 + k / 3) % 1;
-        const fade = 1 - phase;
-        g.fillStyle(COLORS.hotspot, fade * 0.14);
-        g.fillCircle(cx, cy, phase * maxR);
-        g.lineStyle(3, COLORS.hotspot, fade * 0.85);
-        g.strokeCircle(cx, cy, phase * maxR);
-      }
-      return;
-    }
-    // (off-screen down-arrow over the pond is hidden for now)
   }
 
   /** Blades of grass (swaying) on the surface; speckled dirt below. */
@@ -1424,11 +1429,16 @@ export class GameScene extends Phaser.Scene {
 
   /** The poo inside a filled pipe: varied yellow/brown, with specks that drift
    *  steadily DOWN/RIGHT along the pipe (a continuous flow, not a back-and-forth jump). */
+  /** While a freeze is active, shift a poo colour toward icy greeny-blue (reverts on thaw). */
+  private chill(color: number): number {
+    return this.model.frozen ? lerpColor(color, FROZEN_TINT, 0.6) : color;
+  }
+
   private drawSewageFill(g: G, cx: number, cy: number, openings: number, coord: { row: number; col: number }): void {
     const t = CELL * 0.22;
     const half = CELL / 2;
     const seed = hash3(coord.row, coord.col, 2);
-    const base = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.4 + seed * 0.25); // gentle per-segment variance
+    const base = this.chill(lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.4 + seed * 0.25)); // per-segment variance
     const dark = shade(base, 0.72);
     const lite = shade(base, 1.18);
 
@@ -1496,7 +1506,7 @@ export class GameScene extends Phaser.Scene {
     const half = CELL / 2;
     const t = CELL * 0.22; // match a settled tile's poo width
     const seed = hash3(coord.row, coord.col, 2);
-    const base = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.4 + seed * 0.25);
+    const base = this.chill(lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.4 + seed * 0.25));
     const R = t / 2; // stroke radius -> a t-wide round-capped line, same width as the settled poo
     const STEP = CELL * 0.05; // heavy overlap -> a clean fat line
     const dir = (s: Side): [number, number] =>
@@ -1642,7 +1652,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** A pooled text label positioned at a world point (e.g. a faucet's 2x/3x/4x tag). */
-  private useLabel(text: string, x: number, y: number, depth: number, fontPx: number): void {
+  private useLabel(
+    text: string,
+    x: number,
+    y: number,
+    depth: number,
+    fontPx: number,
+    opts?: { alpha?: number; color?: string },
+  ): void {
     let t = this.labels[this.labelIdx];
     if (!t) {
       t = this.add
@@ -1651,7 +1668,13 @@ export class GameScene extends Phaser.Scene {
       this.labels[this.labelIdx] = t;
     }
     this.labelIdx++;
-    t.setText(text).setFontSize(fontPx).setPosition(x, y).setDepth(depth).setVisible(true);
+    t.setText(text)
+      .setFontSize(fontPx)
+      .setPosition(x, y)
+      .setDepth(depth)
+      .setAlpha(opts?.alpha ?? 1)
+      .setColor(opts?.color ?? "#ffffff")
+      .setVisible(true);
   }
 
   /** Flashing "build here" prompt under the toilet at the very start. */
@@ -1800,14 +1823,38 @@ export class GameScene extends Phaser.Scene {
     this.bannerQueue.push({ lines, hold });
   }
 
+  private spawnScorePop(coord: Coord, value: number): void {
+    this.scorePops.push({
+      x: coord.col * CELL + CELL / 2,
+      y: this.rowScreenY(coord.row) + CELL / 2,
+      value,
+      born: this.clock,
+    });
+  }
+
+  /** Floating "+N BONUS" with a star, rising and fading — the classic arcade score pop. */
+  private renderScorePops(): void {
+    const LIFE = 1500;
+    this.scorePops = this.scorePops.filter((p) => this.clock - p.born < LIFE);
+    for (const p of this.scorePops) {
+      const t = (this.clock - p.born) / LIFE;
+      const rise = -t * CELL * 1.8; // drifts up the screen
+      const a = Math.min(1, t * 10) * Math.min(1, (1 - t) / 0.35); // quick in, fade out
+      const x = p.x;
+      const y = p.y + rise;
+      this.useSprite("power-star", x, y - 14, CELL * 0.5, Z_TEXT - 1, 0, { alpha: a });
+      this.useLabel(`+${p.value}\nBONUS`, x, y + 20, Z_TEXT, 15, { alpha: a, color: "#ffd24a" });
+    }
+  }
+
   /** A power tile just fired: pop a labelled toast (the model already applied the effect). */
   private onPowerFired(power: PowerType): void {
     const LABELS: Record<PowerType, string> = {
-      "speed-up": "FLOW SURGE!",
-      "speed-down": "FLOW EASED",
+      "speed-up": "SPILL SURGE!",
+      "speed-down": "SPILL EASED",
       protest: "PROTEST!",
       score: "EXTRA SCORE!",
-      freeze: "FLOW FROZEN!",
+      freeze: "SPILL FROZEN!",
       poison: "FISH POISONED!",
     };
     this.toast = { label: LABELS[power], icon: POWER_SPRITE[power], start: this.clock };
@@ -2077,18 +2124,53 @@ export class GameScene extends Phaser.Scene {
 
   // ---- HUD -------------------------------------------------------------------
 
-  private renderHud(_g: G): void {
+  /** A C4-style segmented countdown clock (top-right): the red "spill remaining" pie depletes
+   *  clockwise as you contain the overflow; empties to green when the whole spill is contained. */
+  private renderSpillClock(g: G): void {
     const m = this.model;
-    // level + banked score + live fish count (points are tallied on the clear screen)
-    this.statusText.setText(`LEVEL ${m.level}\nSCORE ${m.runScore}\nFISH ${m.fishAlive}`);
+    const R = 22;
+    const ccx = GAME_WIDTH - R - 14;
+    const ccy = R + 10;
+    const remaining = Math.max(0, 1 - m.overflowContained / m.overflowTotal); // 1 -> 0
+
+    g.fillStyle(0x06101a, 0.85);
+    g.fillCircle(ccx, ccy, R + 3); // dark face
+    if (remaining > 0.001) {
+      const start = -Math.PI / 2; // 12 o'clock
+      const end = start + remaining * Math.PI * 2;
+      const urgent = remaining <= 0.2;
+      const a = urgent ? 0.75 + 0.25 * Math.sin(this.clock / 110) : 0.92;
+      g.fillStyle(0xff5c5c, a); // red = spill still to contain
+      g.slice(ccx, ccy, R, start, end, false);
+      g.fillPath();
+    } else {
+      g.fillStyle(0x9be15d, 0.95); // fully contained
+      g.fillCircle(ccx, ccy, R);
+    }
+    g.lineStyle(2.5, 0xaeb6c0, 0.95);
+    g.strokeCircle(ccx, ccy, R + 3); // metal bezel
+    g.lineStyle(2, 0x06101a, 0.7); // 12 tick segments
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * Math.PI * 2;
+      g.lineBetween(ccx + Math.cos(a) * (R - 6), ccy + Math.sin(a) * (R - 6), ccx + Math.cos(a) * R, ccy + Math.sin(a) * R);
+    }
+    g.fillStyle(0xe8edf2, 1);
+    g.fillCircle(ccx, ccy, 2.5); // hub
+    this.useLabel("SPILL", ccx, ccy + R + 9, Z_TEXT, 9, { color: "#ffd24a" });
+  }
+
+  private renderHud(g: G): void {
+    const m = this.model;
+    // centre tally: the fish grade + banked score (points are tallied on the clear screen)
+    this.statusText.setText(`FISH ${m.fishAlive}/${m.fishCount}\nSCORE ${m.runScore}`);
+    if (m.started) this.renderSpillClock(g); // top-right C4-style spill countdown
     this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
 
     this.centerText.setPosition(GAME_WIDTH / 2, this.pondTop / 2);
     if (m.state === "COUNTDOWN") {
-      // only count down once the run has actually begun (first pipe under the toilet)
-      this.centerText.setText(m.started ? `FLOW IN ${Math.ceil(m.countdownRemaining / 1000)}` : "");
+      this.centerText.setText(""); // no "flow in" countdown text — the spill just starts
     } else if (m.state === "FLOWING") {
       this.centerText.setText(m.leaking ? "LEAK!" : "");
     } else {
@@ -2147,13 +2229,14 @@ export class GameScene extends Phaser.Scene {
     const m = this.model;
     if (m.started) {
       this.startButton = null;
+      this.factText.setVisible(false);
       return;
     }
     g.fillStyle(0x05070c, 0.66); // dim the board behind it
     g.fillRect(0, 0, GAME_WIDTH, this.viewH);
 
-    const pw = 430;
-    const ph = 320;
+    const pw = 440;
+    const ph = Math.min(this.viewH - 24, 452);
     const px = GAME_WIDTH / 2 - pw / 2;
     const py = this.viewH / 2 - ph / 2;
     g.fillStyle(0x12100e, 0.97);
@@ -2163,14 +2246,21 @@ export class GameScene extends Phaser.Scene {
 
     const intro =
       m.level === 1
-        ? "FLOWZ\n\nWater firms dump sewage\nin the river!\n\nDivert it to the tank\n& save the fish."
-        : `LEVEL ${m.level}\n\nDivert the sewage —\nsave the fish!`;
-    this.centerText.setPosition(GAME_WIDTH / 2, py + 110).setText(intro);
+        ? "SPILLZ\n\nWater firms dump sewage\nin the river!\n\nContain the spill\n& save the fish."
+        : `LEVEL ${m.level}\n\nContain the spill —\nsave the fish!`;
+    this.centerText.setPosition(GAME_WIDTH / 2, py + 86).setText(intro);
+
+    // a real UK water-pollution fact, one per level (cycles through the data set)
+    const f = FACTS[(m.level - 1) % FACTS.length];
+    this.factText
+      .setPosition(GAME_WIDTH / 2, py + 196)
+      .setText(`DID YOU KNOW?\n\n${f.fact}\n\n— ${f.source}`)
+      .setVisible(true);
 
     const bw = 240;
     const bh = 58;
     const bx = GAME_WIDTH / 2 - bw / 2;
-    const by = py + ph - bh - 26;
+    const by = py + ph - bh - 24;
     g.fillStyle(COLORS.pondClean, 0.95);
     g.fillRoundedRect(bx, by, bw, bh, 12);
     this.startButton = { x: bx, y: by, w: bw, h: bh };

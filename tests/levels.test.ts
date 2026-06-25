@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   OBSTACLE_START_ROW,
-  TERMINAL_BASE_ROW,
+  OVERFLOW_BASE,
   obstacleChance,
-  terminalRow,
+  overflowFor,
 } from "../src/core/levels";
 
 describe("difficulty curve", () => {
-  it("puts the treatment works deeper each level", () => {
-    expect(terminalRow(1)).toBe(TERMINAL_BASE_ROW);
-    expect(terminalRow(2)).toBeGreaterThan(terminalRow(1));
-    expect(terminalRow(5)).toBeGreaterThan(terminalRow(2));
+  it("makes the overflow bigger each level", () => {
+    expect(overflowFor(1)).toBe(OVERFLOW_BASE);
+    expect(overflowFor(2)).toBeGreaterThan(overflowFor(1));
+    expect(overflowFor(5)).toBeGreaterThan(overflowFor(2));
   });
 
   it("clog obstacles get denser the deeper you dig (capped)", () => {

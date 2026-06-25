@@ -13,8 +13,8 @@ import {
   fishForLevel,
   fishSpeciesForLevel,
   obstacleChance,
+  overflowFor,
   teesForLevel,
-  terminalRow,
 } from "./levels";
 import type { Coord, FlowEvent, GameState, PieceType, PowerType, QueuePiece } from "./types";
 
@@ -33,8 +33,8 @@ export const CONFIG = {
   rows: 10, // visible viewport rows (the world is infinite downward via scroll)
   cols: 7,
   queueLength: 5,
-  /** Seconds of lead time before the sewage starts oozing (Pipe Mania's start countdown). */
-  countdownMs: 7000,
+  /** Lead time before the spill starts oozing (a quick beat after the board reveals). */
+  countdownMs: 1000,
   /**
    * Milliseconds per pipe segment filled at level 1. THIS is the base flow rate.
    * Higher = slower. Level 1 is a deliberate trickle (forgiving so you can keep ahead
@@ -171,10 +171,10 @@ export class Game {
   private openingGenerated = false;
   /** Deepest grid row that has had clog obstacles seeded. */
   private obstacleRow = OBSTACLE_START_ROW - 1;
-  /** 1-based run number; difficulty + terminal depth scale with it. */
+  /** 1-based run number; difficulty + overflow size scale with it. */
   private readonly levelNumber: number;
-  /** The treatment works — get the sewage here to win the level. */
-  readonly terminal: Coord;
+  /** Segments of sewage to divert/contain to clear this level's overflow. */
+  readonly overflowTotal: number;
   /** How many fish this level's pond holds, and each one's species id. */
   private readonly levelFish: number;
   private readonly fishKindsArr: number[] = [];
@@ -194,9 +194,8 @@ export class Game {
     const source: Coord = { row: 0, col: CONFIG.sourceCol };
     this.grid.set(source, "source");
 
-    // the treatment works sits at the bottom of this level, in the source column
-    this.terminal = { row: terminalRow(level), col: CONFIG.sourceCol };
-    this.grid.set(this.terminal, "terminal");
+    // this level's dump: contain this many sewage segments to clear it (no fixed destination)
+    this.overflowTotal = overflowFor(level);
 
     this.seedBoardThrough(CONFIG.rows * 2);
 
@@ -270,6 +269,16 @@ export class Game {
 
   get score(): number {
     return this.filled.length;
+  }
+
+  /** Segments of sewage diverted/contained so far (excludes the source). */
+  get overflowContained(): number {
+    return Math.max(0, this.filled.length - 1);
+  }
+
+  /** How much of this level's overflow is contained, 0..100 — the "DUMP CONTAINED" bar. */
+  get overflowPct(): number {
+    return Math.min(100, Math.round((this.overflowContained / this.overflowTotal) * 100));
   }
 
   /** Current level (the run number). */
@@ -367,7 +376,8 @@ export class Game {
         crosses: crossesForLevel(this.level),
         tees: teesForLevel(this.level),
         rng: this.rng,
-        // aim the planned path down the source column toward the works (the assist)
+        // bias the planned path to keep DESCENDING (no fixed destination — it's an overflow you
+        // divert ever downward); the synthetic point below just pulls the walk down the column.
         target: { row: pathLen + 8, col: CONFIG.sourceCol },
         directness: directnessForLevel(this.level),
       }),
@@ -380,9 +390,7 @@ export class Game {
    * deeper. Only ever placed on empty cells, so they never touch player pipes.
    */
   private seedBoardThrough(targetRow: number): void {
-    // never seed the terminal row or below — keep the approach to it clear
-    const cap = Math.min(targetRow, this.terminal.row - 1);
-    while (this.obstacleRow < cap) {
+    while (this.obstacleRow < targetRow) {
       this.obstacleRow++;
       const r = this.obstacleRow;
       const clog = obstacleChance(r);
@@ -407,7 +415,7 @@ export class Game {
    *  is handed over later, once the player builds near it (see placePiece). */
   private maybeSeedFatberg(r: number): void {
     if (this.fatbergPlaced || this.level < CONFIG.fatbergFromLevel) return;
-    if (r < OBSTACLE_START_ROW + 3 || r >= this.terminal.row - 2) return;
+    if (r < OBSTACLE_START_ROW + 4) return; // a few rows into the dump, never right at the top
     // a 2x2 block whose columns avoid the source column, so a route always exists
     const lefts = [0, 1, 4, 5].filter(
       (c) => c + 1 < CONFIG.cols && c !== CONFIG.sourceCol && c + 1 !== CONFIG.sourceCol,
@@ -467,21 +475,14 @@ export class Game {
       this.adjustBalance(-CONFIG.overwriteHit);
     }
 
-    // A placement that changes the flow takes effect NOW — pull the next tick forward so the
-    // flood re-evaluates this frame instead of after a slow tick. Two cases:
-    //  - completing the route to the works (start the super-speed dash immediately), and
-    //  - capping / replacing a leaking end (so the spill stops the instant the player plugs it,
-    //    rather than gushing for up to a full tick afterwards).
-    if (this.state === "FLOWING") {
-      const capsLeak =
-        this.leaking &&
-        this.leaks.some((l) => {
-          const t = step(l.from, l.out);
-          return (t.row === c.row && t.col === c.col) || (l.from.row === c.row && l.from.col === c.col);
-        });
-      if (this.isConnectedToTerminal() || capsLeak) {
-        this.nextFlowAt = Math.min(this.nextFlowAt, this.elapsed);
-      }
+    // Capping / replacing a leaking end takes effect NOW — pull the next tick forward so the
+    // spill stops the instant the player plugs it, rather than gushing for up to a full tick.
+    if (this.state === "FLOWING" && this.leaking) {
+      const capsLeak = this.leaks.some((l) => {
+        const t = step(l.from, l.out);
+        return (t.row === c.row && t.col === c.col) || (l.from.row === c.row && l.from.col === c.col);
+      });
+      if (capsLeak) this.nextFlowAt = Math.min(this.nextFlowAt, this.elapsed);
     }
     return true;
   }
@@ -504,7 +505,7 @@ export class Game {
   canPlace(c: Coord): boolean {
     if (!this.grid.inBounds(c)) return false;
     const existing = this.grid.get(c);
-    if (existing?.type === "source" || existing?.type === "terminal") return false; // fixtures
+    if (existing?.type === "source") return false; // the manhole is a fixture
     if (existing?.type === "fatberg") return false; // can't build through the boss — blow it up
     // clogs CAN be built through (at a cost — see placePiece), so they're not blocked here
     if (this.isFilled(c)) {
@@ -744,37 +745,11 @@ export class Game {
   }
 
   private effectiveFlowMs(): number {
-    // Once the player has connected a finished pipe all the way to the works, the
-    // outcome is decided — zoom the flow so they don't sit watching it crawl.
-    if (this.isConnectedToTerminal()) return CONFIG.superFlowMs;
     const base = CONFIG.flowIntervalMs - (this.level - 1) * CONFIG.flowSpeedupPerLevel;
     return Math.max(
       CONFIG.minFlowIntervalMs,
       Math.min(CONFIG.maxFlowIntervalMs, base + this.flowMod),
     );
-  }
-
-  /** True once a continuous connected pipe path exists from the toilet to the works. */
-  isConnectedToTerminal(): boolean {
-    const start: Coord = { row: 0, col: CONFIG.sourceCol };
-    const seen = new Set<string>([keyOf(start)]);
-    const stack: Coord[] = [start];
-    while (stack.length) {
-      const c = stack.pop()!;
-      const cell = this.grid.get(c);
-      if (!cell) continue;
-      for (const dir of sidesOf(cell.openings)) {
-        const nb = step(c, dir);
-        const nbCell = this.grid.get(nb);
-        if (!nbCell || (nbCell.openings & opposite(dir)) === 0) continue; // not joined
-        if (nb.row === this.terminal.row && nb.col === this.terminal.col) return true;
-        const k = keyOf(nb);
-        if (seen.has(k)) continue;
-        seen.add(k);
-        stack.push(nb);
-      }
-    }
-    return false;
   }
 
   /** Advance the flood one ring: drain for current leaks, then fill the next ring. */
@@ -795,6 +770,17 @@ export class Game {
       this.adjustBalance(CONFIG.healPerSegment); // containment slowly recovers quality
       if (this.state !== "FLOWING") return;
     }
+
+    // The whole overflow is contained — level cleared, graded by the fish saved.
+    if (this.overflowContained >= this.overflowTotal) this.winLevel();
+  }
+
+  /** Clear the level: the overflow is fully diverted. Bank the survivors and tally the points. */
+  private winLevel(): void {
+    if (this.state !== "FLOWING") return;
+    this.state = "WON";
+    this.fishSaved += this.fishAlive; // bank the survivors
+    this.runScore += this.levelFishBonus + this.levelPurityBonus;
   }
 
   /** Record a newly-filled cell and fire any special effect the sewage hits there. */
@@ -803,18 +789,27 @@ export class Game {
     this.filledSet.add(keyOf(coord));
     if (coord.row > this.maxFilledRow) this.maxFilledRow = coord.row;
     const cell = this.grid.get(coord);
-    if (cell?.type === "terminal") {
-      this.state = "WON"; // sewage reached the treatment works — pond saved!
-      this.fishSaved += this.fishAlive; // bank the survivors
-      this.runScore += this.levelFishBonus + this.levelPurityBonus; // tally the points
-      return;
-    }
     if (cell?.power) this.applyPower(coord, cell.power);
   }
 
   /** Fire (once) the power on a freshly-filled cell, then consume it. */
   private applyPower(c: Coord, power: PowerType): void {
     const mag = this.grid.get(c)?.powerMag ?? 1; // 2x / 3x / 4x faucet strength
+    this.firePower(power, mag, c);
+    const cell = this.grid.get(c);
+    if (cell) cell.power = undefined; // spent
+  }
+
+  /** DEV: fire a power right now (no marker needed) for testing — at the flow front. */
+  devFirePower(power: PowerType): void {
+    if (this.state !== "FLOWING") return;
+    const c = this.filled.length > 1 ? this.filled[this.filled.length - 1].coord : { row: 1, col: CONFIG.sourceCol };
+    this.firePower(power, 3, c);
+  }
+
+  /** Apply a power's effect and emit its event (shared by real markers and the dev key). */
+  private firePower(power: PowerType, mag: number, c: Coord): void {
+    let bonus: number | undefined; // points awarded (score marker) — carried to the scene
     switch (power) {
       case "speed-up":
         this.flowMod += CONFIG.speedUpDeltaMs * mag;
@@ -827,7 +822,8 @@ export class Game {
         this.profitPounds = Math.max(0, this.profitPounds - CONFIG.protestPounds);
         break;
       case "score":
-        this.runScore += CONFIG.scorePower * mag; // 2x / 3x / 4x bonus points
+        bonus = CONFIG.scorePower * mag; // 2x / 3x / 4x bonus points
+        this.runScore += bonus;
         break;
       case "freeze":
         this.frozenUntil = this.elapsed + CONFIG.freezeMs; // pause the flow a few seconds
@@ -836,9 +832,7 @@ export class Game {
         this.killOneFish(); // a fish dies instantly
         break;
     }
-    this.events.push({ kind: "power", power, coord: c });
-    const cell = this.grid.get(c);
-    if (cell) cell.power = undefined; // spent
+    this.events.push({ kind: "power", power, coord: c, value: bonus });
   }
 
   /** Drain the flow events accumulated since the last call (the scene shows toasts). */

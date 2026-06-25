@@ -1,0 +1,262 @@
+{
+  "facts": [
+    {
+      "id": "S01",
+      "category": "sewage_overflow",
+      "fact": "In 2024, raw sewage poured into England's rivers and seas for a record 3.61 million hours.",
+      "source": "Environment Agency EDM Data 2024"
+    },
+    {
+      "id": "S02",
+      "category": "sewage_overflow",
+      "fact": "There were 450,398 sewage spill events in England in 2024 — more than 1,200 every single day.",
+      "source": "Environment Agency EDM Data 2024"
+    },
+    {
+      "id": "S03",
+      "category": "sewage_overflow",
+      "fact": "The 2024 sewage spill total is equivalent to 412 continuous years of raw sewage flowing into our waterways.",
+      "source": "River Action UK"
+    },
+    {
+      "id": "S04",
+      "category": "sewage_overflow",
+      "fact": "Across the UK in 2024, there was an estimated sewage discharge almost every 30 seconds.",
+      "source": "Surfers Against Sewage"
+    },
+    {
+      "id": "S05",
+      "category": "sewage_overflow",
+      "fact": "Thames Water alone discharged raw sewage for 298,081 hours in 2024 — a 51% rise on the year before.",
+      "source": "River Action UK"
+    },
+    {
+      "id": "S06",
+      "category": "sewage_overflow",
+      "fact": "Every day in the UK, over 11 billion litres of wastewater flows through 347,000 km of sewers.",
+      "source": "Environment Agency / Earthwatch"
+    },
+    {
+      "id": "S07",
+      "category": "sewage_overflow",
+      "fact": "England has over 15,000 Combined Sewer Overflow sites discharging directly into rivers and seas.",
+      "source": "Environment Agency"
+    },
+    {
+      "id": "S08",
+      "category": "sewage_overflow",
+      "fact": "Water companies are legally permitted to discharge untreated sewage into rivers — they just aren't supposed to do it routinely.",
+      "source": "House of Commons Library"
+    },
+    {
+      "id": "S09",
+      "category": "sewage_overflow",
+      "fact": "About 30% of Thames Water's underground infrastructure is unmapped — vast sections are unknown even to the company.",
+      "source": "River Action UK"
+    },
+    {
+      "id": "S10",
+      "category": "sewage_overflow",
+      "fact": "Most sewage treatment permits do not require the removal of dangerous pathogens — even 'treated' effluent still threatens public health.",
+      "source": "River Action UK"
+    },
+    {
+      "id": "R01",
+      "category": "river_health",
+      "fact": "Not a single stretch of river in England or Northern Ireland is in good overall health.",
+      "source": "Rivers Trust State of Our Rivers Report 2024"
+    },
+    {
+      "id": "R02",
+      "category": "river_health",
+      "fact": "Only 14% of rivers in England meet good ecological status. None pass good chemical status.",
+      "source": "Environment Agency / House of Lords Library"
+    },
+    {
+      "id": "R03",
+      "category": "river_health",
+      "fact": "Toxic chemicals that persist for decades have been found in every single stretch of English river.",
+      "source": "Rivers Trust State of Our Rivers Report 2024"
+    },
+    {
+      "id": "R04",
+      "category": "river_health",
+      "fact": "Three-quarters of shellfish waters in England fail to meet water quality standards.",
+      "source": "Marine Conservation Society / Defra"
+    },
+    {
+      "id": "R05",
+      "category": "river_health",
+      "fact": "Agriculture is responsible for 40% of England's river pollution — more than water companies.",
+      "source": "Environment Agency / Wicked Leeks 2024"
+    },
+    {
+      "id": "E01",
+      "category": "environmental_impact",
+      "fact": "Sewage triggers algal blooms that block sunlight, suffocate aquatic plants, and strip oxygen from the water.",
+      "source": "Natural History Museum"
+    },
+    {
+      "id": "E02",
+      "category": "environmental_impact",
+      "fact": "When algae die and decompose, bacteria consume what little oxygen remains — killing fish and invertebrates.",
+      "source": "Natural History Museum / London Wildlife Trust"
+    },
+    {
+      "id": "E03",
+      "category": "environmental_impact",
+      "fact": "Freshwater insects are among the first to die when sewage enters a river — many spend years developing underwater.",
+      "source": "Natural History Museum"
+    },
+    {
+      "id": "E04",
+      "category": "environmental_impact",
+      "fact": "When sewage destroys insect populations, fish lose their food source — even those that swam clear of the discharge.",
+      "source": "Natural History Museum"
+    },
+    {
+      "id": "E05",
+      "category": "environmental_impact",
+      "fact": "Raw sewage contains E. coli, Enterococci, microplastics, PFAS 'forever chemicals', and antibiotic-resistant bacteria.",
+      "source": "Marine Conservation Society / River Action"
+    },
+    {
+      "id": "E06",
+      "category": "environmental_impact",
+      "fact": "Microplastics and PFAS 'forever chemicals' from sewage cannot be removed once in the environment — they accumulate forever.",
+      "source": "Marine Conservation Society"
+    },
+    {
+      "id": "E07",
+      "category": "environmental_impact",
+      "fact": "On the River Otter, E. coli exceeded the safe swimming limit on more than 90% of days monitored.",
+      "source": "Hansard, June 2026"
+    },
+    {
+      "id": "E08",
+      "category": "environmental_impact",
+      "fact": "After rainfall, E. coli in some UK rivers spikes to 100 times the legal safe limit for swimming.",
+      "source": "Hansard / South West Water FOI data"
+    },
+    {
+      "id": "E09",
+      "category": "environmental_impact",
+      "fact": "A single sewage treatment works can increase phosphate levels in a river by around 80% during summer months.",
+      "source": "ORCA monitoring / Hansard 2026"
+    },
+    {
+      "id": "E10",
+      "category": "environmental_impact",
+      "fact": "Sewage pollution impacts the entire food chain — from aquatic plants and insects up to herons, otters, and seals.",
+      "source": "London Wildlife Trust"
+    },
+    {
+      "id": "F01",
+      "category": "farm_runoff",
+      "fact": "Agriculture is responsible for 70% of the nitrogen and 25% of the phosphorus entering UK waterways.",
+      "source": "River Action UK / Defra"
+    },
+    {
+      "id": "F02",
+      "category": "farm_runoff",
+      "fact": "Agriculture affects more than 60% of England's rivers that are failing to meet good ecological status.",
+      "source": "Parliamentary Office of Science and Technology"
+    },
+    {
+      "id": "F03",
+      "category": "farm_runoff",
+      "fact": "In 2021, agriculture accounted for 87% of all UK ammonia emissions.",
+      "source": "Defra Agriculture in the UK 2022"
+    },
+    {
+      "id": "F04",
+      "category": "farm_runoff",
+      "fact": "Dairy farming alone caused 48 serious river pollution incidents in England in 2024.",
+      "source": "Environment Agency / Wicked Leeks"
+    },
+    {
+      "id": "F05",
+      "category": "farm_runoff",
+      "fact": "The River Wye has lost 90% of its Ranunculus weed beds due to phosphorus runoff from intensive poultry farming.",
+      "source": "Aquaswitch / River Action"
+    },
+    {
+      "id": "F06",
+      "category": "farm_runoff",
+      "fact": "Farmland in the River Wye catchment holds enough excess phosphorus to fertilise crops for another 20 years without further input.",
+      "source": "River Action UK"
+    },
+    {
+      "id": "F07",
+      "category": "farm_runoff",
+      "fact": "Pesticides, herbicides, and fungicides from farms wash into rivers during rainfall — often impossible to trace back to source.",
+      "source": "Parliamentary Office of Science and Technology"
+    },
+    {
+      "id": "F08",
+      "category": "farm_runoff",
+      "fact": "Farm runoff drives up household water bills — water companies must spend heavily to remove agricultural nutrients before it reaches taps.",
+      "source": "River Action UK / POST"
+    },
+    {
+      "id": "P01",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Antidepressants, antibiotics, painkillers, and contraceptive hormones have all been detected in UK rivers.",
+      "source": "Imperial College London / University of York"
+    },
+    {
+      "id": "P02",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Pharmaceuticals were found in river water at 52 out of 54 locations monitored across all ten of England's National Parks.",
+      "source": "University of York / Rivers Trust 2024"
+    },
+    {
+      "id": "P03",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Up to 90% of drugs consumed by humans pass through the body unchanged and enter the sewage system.",
+      "source": "Noticias Ambientales / pharmaceutical pollution research"
+    },
+    {
+      "id": "P04",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Only 27% of people return unused medicines to a pharmacy — the rest are flushed or binned, entering waterways.",
+      "source": "Pharmaceutical pollution research"
+    },
+    {
+      "id": "P05",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Synthetic oestrogen from contraceptive pills has caused male fish to grow female organs and produce female hormones.",
+      "source": "Natural History Museum"
+    },
+    {
+      "id": "P06",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Antidepressants in river water have been shown to reduce fish feeding rates and alter risk-taking behaviour.",
+      "source": "Natural History Museum"
+    },
+    {
+      "id": "P07",
+      "category": "pharmaceuticals_in_water",
+      "fact": "A London site had the highest recorded hazard level in a global study of antidepressant water pollution.",
+      "source": "Natural History Museum / global pharmaceutical study"
+    },
+    {
+      "id": "P08",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Prescription drugs including antidepressants, diabetes drugs, and antibiotics have been found inside crabs and oysters off the English coast.",
+      "source": "The Pharmacist / Clean Harbours Partnership"
+    },
+    {
+      "id": "P09",
+      "category": "pharmaceuticals_in_water",
+      "fact": "The UK has no legal requirement to systematically monitor pharmaceuticals in rivers, bathing waters, or drinking water sources.",
+      "source": "Noticias Ambientales / pharmaceutical pollution research 2026"
+    },
+    {
+      "id": "P10",
+      "category": "pharmaceuticals_in_water",
+      "fact": "Antibiotic pollution in rivers is accelerating the rise of antibiotic-resistant bacteria — a threat to human medicine globally.",
+      "source": "The Pharmacist"
+    }
+  ]
+}
