@@ -207,6 +207,8 @@ const FISH_COLORS = [0x9be15d, 0xffb347, 0x6fd3ff, 0xff8da3, 0xc792ea, 0xf6e05e]
 const PLACE_ANIM_MS = 170;
 const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
 const FACTS: { fact: string; source: string }[] = factsData.facts;
+// SFX names: a real sample at assets/sfx/<name>.mp3 plays in preference to the synth fallback.
+const SFX_NAMES = ["place", "flow", "leak", "cap", "tick", "win", "lose", "splosh", "junk", "score", "freeze", "poison", "rain", "blitz", "speedup"] as const;
 
 /** Ease-out with a little overshoot — the "ta-da" pop. */
 function easeOutBack(t: number): number {
@@ -305,6 +307,7 @@ export class GameScene extends Phaser.Scene {
   private prevLeaking = false; // for leak-start / cap sounds
   private finalSurge = false; // the last-stretch "FINAL SURGE!" has fired
   private lastTickAt = 0; // accelerating finale tick
+  private lastSploshAt = 0; // throttle the river-splash sound
   private flashUntil = -1; // full-screen colour flash (surge / win)
   private flashColor = 0xffffff;
 
@@ -348,6 +351,8 @@ export class GameScene extends Phaser.Scene {
       this.load.svg(`fish-${i}-dead`, `assets/decor/fish-${i}-dead.svg`, { width: 96, height: 96 });
     }
     this.load.image("decor-toilet", "assets/decor/toilet.png"); // drop your PNG to override
+    // optional SFX samples — drop assets/sfx/<name>.mp3 and it overrides the synth fallback
+    for (const s of SFX_NAMES) this.load.audio(`sfx-${s}`, `assets/sfx/${s}.mp3`);
   }
 
   create(data?: { level?: number; fishSaved?: number; runScore?: number; seenHints?: string[] }): void {
@@ -382,6 +387,7 @@ export class GameScene extends Phaser.Scene {
     this.prevLeaking = false;
     this.finalSurge = false;
     this.lastTickAt = 0;
+    this.lastSploshAt = 0;
     this.flashUntil = -1;
     this.endButton = null;
     this.startButton = null;
@@ -541,8 +547,10 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** A filtered white-noise burst — for clunks, splashes, hiss. */
-  private noise(durMs: number, vol: number, filterHz: number): void {
+  /** A white-noise burst through a (optionally swept, optionally resonant) lowpass — the filter
+   *  glide from `startHz` to `endHz` is what turns hiss into a splash/squelch; `q` adds the wet
+   *  resonant "vowel". `attackMs` lets the gain swell (a rising splash) instead of just decay. */
+  private noise(durMs: number, vol: number, startHz: number, endHz = startHz, q = 0.7, attackMs = 0): void {
     const ctx = this.audio;
     if (!ctx || ctx.state !== "running") return;
     try {
@@ -554,38 +562,56 @@ export class GameScene extends Phaser.Scene {
       src.buffer = buf;
       const filt = ctx.createBiquadFilter();
       filt.type = "lowpass";
-      filt.frequency.value = filterHz;
-      const gain = ctx.createGain();
+      filt.Q.value = q;
       const now = ctx.currentTime;
-      gain.gain.setValueAtTime(vol, now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + durMs / 1000);
+      const end = now + durMs / 1000;
+      filt.frequency.setValueAtTime(startHz, now);
+      filt.frequency.exponentialRampToValueAtTime(Math.max(40, endHz), end);
+      const gain = ctx.createGain();
+      const peakAt = now + Math.min(attackMs, durMs * 0.6) / 1000;
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(vol, peakAt);
+      gain.gain.exponentialRampToValueAtTime(0.0001, end);
       src.connect(filt);
       filt.connect(gain);
       gain.connect(ctx.destination);
       src.start(now);
-      src.stop(now + durMs / 1000);
+      src.stop(end);
     } catch {
       /* ignore */
     }
   }
 
-  // ---- named game SFX (all synthesized, no assets) ----
-  private sfxPlace(): void { this.noise(55, 0.06, 2400); this.tone(170, 90, "square", 0.05, 90); } // clunk
-  private sfxFlow(pct: number): void { this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160); } // rising blip
-  private sfxLeak(): void { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); } // alarm
-  private sfxCap(): void { this.tone(260, 130, "square", 0.05, 540); } // relief clamp
-  private sfxTick(): void { this.tone(950, 32, "square", 0.04); } // finale tick
-  private sfxWin(): void { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, "triangle", 0.06, f, i * 110)); } // fanfare
-  private sfxLose(): void { this.tone(330, 650, "sawtooth", 0.06, 80); }
-  private sfxPower(power: PowerType): void {
-    switch (power) {
-      case "score": [660, 880, 1100].forEach((f, i) => this.tone(f, 90, "triangle", 0.05, f, i * 55)); break;
-      case "freeze": this.tone(820, 420, "sine", 0.05, 200); break;
-      case "poison": this.tone(160, 300, "sawtooth", 0.06, 60); this.noise(220, 0.04, 700); break;
-      case "rain": this.noise(520, 0.05, 950); break;
-      case "blitz": this.noise(70, 0.06, 3200); this.tone(1200, 130, "square", 0.05, 220); break;
-      default: this.tone(300, 180, "square", 0.04, 900); // speed-up whoosh
+  /** Play SFX `name`: a real sample at assets/sfx/<name>.mp3 if present, else the synth fallback. */
+  private playSfx(name: string, fallback: () => void, vol = 0.5): void {
+    if (this.cache.audio.exists(`sfx-${name}`)) {
+      try { this.sound.play(`sfx-${name}`, { volume: vol }); return; } catch { /* fall through */ }
     }
+    fallback();
+  }
+
+  // ---- named game SFX (sample if provided, else synthesized) ----
+  private sfxPlace(): void { this.playSfx("place", () => { this.noise(55, 0.06, 2400); this.tone(170, 90, "square", 0.05, 90); }); }
+  private sfxFlow(pct: number): void { this.playSfx("flow", () => this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160), 0.35); }
+  private sfxLeak(): void { this.playSfx("leak", () => { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); }); }
+  private sfxCap(): void { this.playSfx("cap", () => this.tone(260, 130, "square", 0.05, 540)); }
+  private sfxTick(): void { this.playSfx("tick", () => this.tone(950, 32, "square", 0.04), 0.4); }
+  private sfxWin(): void { this.playSfx("win", () => [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, "triangle", 0.06, f, i * 110))); }
+  private sfxLose(): void { this.playSfx("lose", () => this.tone(330, 650, "sawtooth", 0.06, 80)); }
+  private sfxSplosh(): void { this.playSfx("splosh", () => { this.noise(270, 0.08, 5200, 320, 2, 40); this.tone(700, 230, "sine", 0.045, 150); }); }
+  private sfxJunk(): void { this.playSfx("junk", () => { this.noise(190, 0.09, 2400, 190, 9, 8); this.tone(150, 160, "sine", 0.05, 52); }); }
+  private sfxPower(power: PowerType): void {
+    const name = power === "speed-up" ? "speedup" : power;
+    this.playSfx(name, () => {
+      switch (power) {
+        case "score": [660, 880, 1100].forEach((f, i) => this.tone(f, 90, "triangle", 0.05, f, i * 55)); break;
+        case "freeze": this.tone(820, 420, "sine", 0.05, 200); break;
+        case "poison": this.tone(160, 300, "sawtooth", 0.06, 60); this.noise(220, 0.04, 700); break;
+        case "rain": this.noise(520, 0.05, 950); break;
+        case "blitz": this.noise(70, 0.06, 3200); this.tone(1200, 130, "square", 0.05, 220); break;
+        default: this.tone(300, 180, "square", 0.04, 900); // speed-up whoosh
+      }
+    });
   }
 
   private onDown(p: Phaser.Input.Pointer): void {
@@ -746,7 +772,7 @@ export class GameScene extends Phaser.Scene {
     // message popups are disabled for now — keep only the physical effects
     // (junk tumbling into the pond, the dynamite blast)
     for (const e of this.model.consumeEvents()) {
-      if (e.kind === "clog") this.spawnJunkDrop(e);
+      if (e.kind === "clog") { this.spawnJunkDrop(e); this.sfxJunk(); } // wet squelch as you clear it
       else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
       else if (e.kind === "power" && e.power === "score") { this.spawnScorePop(e.coord, e.value ?? 0); this.sfxPower("score"); }
       else if (e.kind === "power" && e.power === "blitz") {
@@ -872,6 +898,10 @@ export class GameScene extends Phaser.Scene {
           j.floating = true; // landed — settle and bob
           j.y = floatLine;
           j.vx = (Math.random() - 0.5) * 22;
+          if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 110) {
+            this.lastSploshAt = this.clock;
+            this.sfxSplosh();
+          }
         }
       }
     }
@@ -2165,6 +2195,11 @@ export class GameScene extends Phaser.Scene {
 
   /** Throw up a little crown of droplets + a ripple where a drip hits the pond. */
   private spawnSplash(x: number, y: number, impactVy: number): void {
+    // throttled, and silenced once the level's over (drips keep falling under the end card)
+    if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 110) {
+      this.lastSploshAt = this.clock;
+      this.sfxSplosh();
+    }
     if (this.splashes.length > 120) return;
     this.splashes.push({ x, y, vx: 0, vy: 0, life: 420, ripple: true });
     const n = 3 + Math.floor(Math.random() * 3);
