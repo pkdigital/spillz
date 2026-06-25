@@ -234,6 +234,13 @@ export class GameScene extends Phaser.Scene {
   private explosions: { row: number; col: number; start: number }[] = [];
   /** Hit-rect of the end-of-level dialog button (null when no dialog is shown). */
   private endButton: { x: number; y: number; w: number; h: number } | null = null;
+  // drag-to-scroll: distinguish a tap (place) from a drag (pan), and peek away
+  // from the auto-follow camera until `manualScrollUntil`, then drift back.
+  private dragStartX = 0;
+  private dragStartY: number | null = null;
+  private dragStartScroll = 0;
+  private dragging = false;
+  private manualScrollUntil = 0;
   private buttonText!: Phaser.GameObjects.Text;
 
   /** Current on-screen "Oh No. Condom!"-style toast. */
@@ -264,6 +271,7 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 256, height: 256 });
     this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
     this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
+    this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
     for (let i = 1; i <= 5; i++) {
       this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 96, height: 96 });
     }
@@ -288,6 +296,9 @@ export class GameScene extends Phaser.Scene {
     this.boxX = 0;
     this.explosions = [];
     this.endButton = null;
+    this.dragStartY = null;
+    this.dragging = false;
+    this.manualScrollUntil = 0;
     this.toast = null;
     this.prevFront = undefined;
     this.rouletteStart = -9999;
@@ -336,19 +347,45 @@ export class GameScene extends Phaser.Scene {
       .setDepth(Z_TEXT)
       .setVisible(false);
 
-    this.input.on("pointerdown", this.onPointer, this);
+    this.input.on("pointerdown", this.onDown, this);
+    this.input.on("pointermove", this.onMove, this);
+    this.input.on("pointerup", this.onUp, this);
     // dev shortcut: press N to skip to the next level (e.g. to reach the fatberg on L3+)
     this.input.keyboard?.on("keydown-N", () => {
       this.pendingRestart = { level: this.model.level + 1, fishSaved: this.model.fishSaved };
     });
   }
 
-  private onPointer(p: Phaser.Input.Pointer): void {
-    // Defer scene restarts to the next update tick — restarting from inside an
-    // input callback can leave the scene half-torn-down (blank screen).
+  private onDown(p: Phaser.Input.Pointer): void {
+    this.dragStartX = p.x;
+    this.dragStartY = p.y;
+    this.dragStartScroll = this.scrollPx;
+    this.dragging = false;
+  }
+
+  /** Drag up/down to pan the grid (peek above/below the auto-follow view). */
+  private onMove(p: Phaser.Input.Pointer): void {
+    if (this.dragStartY === null || !p.isDown) return;
+    const dx = p.x - this.dragStartX;
+    const dy = p.y - this.dragStartY;
+    if (!this.dragging && Math.hypot(dx, dy) > 10) this.dragging = true; // tap vs drag
+    if (this.dragging) {
+      this.manualScrollUntil = this.clock + 2500; // hold the peek, then drift back
+      this.scrollPx = Math.max(0, Math.min(this.maxScroll(), this.dragStartScroll - dy));
+      this.scrollTargetPx = this.scrollPx;
+    }
+  }
+
+  private onUp(p: Phaser.Input.Pointer): void {
+    const wasDrag = this.dragging;
+    this.dragStartY = null;
+    this.dragging = false;
+    if (wasDrag) return; // it was a scroll, not a placement
+
+    // Defer scene restarts to the next update tick (restarting inside an input
+    // callback can leave the scene half-torn-down -> blank screen).
     if (this.model.state === "WON" || this.model.state === "GAMEOVER") {
-      // only the dialog button advances — a stray tap from gameplay does nothing
-      const b = this.endButton;
+      const b = this.endButton; // only the dialog button advances
       if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
         const level = this.model.state === "WON" ? this.model.level + 1 : this.model.level;
         this.pendingRestart = { level, fishSaved: this.model.fishSaved };
@@ -358,7 +395,14 @@ export class GameScene extends Phaser.Scene {
     const coord = this.toCell(p.x, p.y);
     if (coord && this.model.placePiece(coord)) {
       this.placedAnim.set(`${coord.row},${coord.col}`, this.clock); // animate it drawing in
+      this.manualScrollUntil = 0; // resume auto-follow now that you've acted
     }
+  }
+
+  /** How far down the player may pan — a few rows past the deepest action. */
+  private maxScroll(): number {
+    const deepest = Math.max(this.model.buildRow, this.model.frontRow, this.model.terminal.row);
+    return Math.max(0, (deepest - this.visRows + 4) * CELL);
   }
 
   private toCell(x: number, y: number): Coord | null {
@@ -546,18 +590,20 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateCamera(deltaMs: number): void {
-    // Deadzone camera: follow the latest placement, scrolling up OR down only when
-    // it strays into the top/bottom MARGIN rows of the view.
-    const margin = FOLLOW_BOTTOM_MARGIN;
-    const focusViewRow = this.model.buildRow - this.scrollPx / CELL;
-    if (focusViewRow > this.visRows - margin) {
-      this.scrollTargetPx = (this.model.buildRow - (this.visRows - margin)) * CELL;
-    } else if (focusViewRow < margin) {
-      this.scrollTargetPx = (this.model.buildRow - margin) * CELL;
+    // While the player is peeking (drag-to-scroll), leave the camera where they put
+    // it; otherwise deadzone-follow the latest placement and drift back smoothly.
+    if (this.clock >= this.manualScrollUntil) {
+      const margin = FOLLOW_BOTTOM_MARGIN;
+      const focusViewRow = this.model.buildRow - this.scrollPx / CELL;
+      if (focusViewRow > this.visRows - margin) {
+        this.scrollTargetPx = (this.model.buildRow - (this.visRows - margin)) * CELL;
+      } else if (focusViewRow < margin) {
+        this.scrollTargetPx = (this.model.buildRow - margin) * CELL;
+      }
+      this.scrollTargetPx = Math.max(0, this.scrollTargetPx);
+      const k = Math.min(1, deltaMs / SCROLL_SMOOTH_MS);
+      this.scrollPx += (this.scrollTargetPx - this.scrollPx) * k;
     }
-    this.scrollTargetPx = Math.max(0, this.scrollTargetPx);
-    const k = Math.min(1, deltaMs / SCROLL_SMOOTH_MS);
-    this.scrollPx += (this.scrollTargetPx - this.scrollPx) * k;
   }
 
   // ---- sprite pool -----------------------------------------------------------
@@ -625,8 +671,20 @@ export class GameScene extends Phaser.Scene {
         }
       }
     }
+    const haveBergSprite = this.textures.exists("fatberg");
     for (const c of fatbergCells) {
-      this.drawFatbergCell(w, c.col * CELL + CELL / 2, this.rowScreenY(c.row) + CELL / 2, c);
+      const isBerg = (dr: number, dc: number) =>
+        this.model.grid.get({ row: c.row + dr, col: c.col + dc })?.type === "fatberg";
+      if (haveBergSprite) {
+        if (isBerg(-1, 0) || isBerg(0, -1)) continue; // one sprite, drawn at the 2x2 anchor
+        const ccx = c.col * CELL + CELL; // centre of the 2x2 block
+        const ccy = this.rowScreenY(c.row) + CELL;
+        w.fillStyle(0x000000, 0.16);
+        w.fillEllipse(ccx, ccy + CELL * 0.85, CELL * 1.5, CELL * 0.3); // ground shadow
+        this.useSprite("fatberg", ccx, ccy, CELL * 2.2, Z_GRID_SPRITE + 1);
+      } else {
+        this.drawFatbergCell(w, c.col * CELL + CELL / 2, this.rowScreenY(c.row) + CELL / 2, c);
+      }
     }
 
     this.drawTerminalBeacon(w);
