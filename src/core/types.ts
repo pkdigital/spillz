@@ -38,7 +38,9 @@ export type PowerType =
   | "protest"
   | "score" // bonus points (good)
   | "freeze" // pauses the flow for a few seconds (good — breathing room)
-  | "poison"; // drops into the pond and kills a fish instantly (hazard)
+  | "poison" // drops into the pond and kills a fish instantly (hazard)
+  | "rain" // obscures the view a few seconds but heals water quality (mixed)
+  | "blitz"; // scatters free pipe pieces into nearby empty tiles (good — chaotic)
 
 /** Themed clog variants (cosmetic) for blocker tiles — the unflushables. */
 export type JunkType = "condom" | "wet-wipes" | "cotton-buds" | "sanitary-pad";
@@ -75,6 +77,8 @@ export interface FlowEvent {
   coord: Coord;
   /** Payload for the effect — e.g. the bonus points a score marker awarded. */
   value?: number;
+  /** Extra coords touched by the effect — e.g. the tiles a blitz dropped pipe into. */
+  coords?: Coord[];
 }
 
 /** Top-level run state machine. WON = sewage reached the treatment works. */

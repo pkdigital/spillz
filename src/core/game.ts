@@ -1,7 +1,7 @@
 import { Grid } from "./grid";
 import { floodStep, type LeakEdge } from "./flow";
 import { buildChunk } from "./queue";
-import { opposite, randomJunk, randomPower, sidesOf, step } from "./pieces";
+import { opposite, randomJunk, randomPiece, randomPower, sidesOf, step } from "./pieces";
 import { Side } from "./types";
 import {
   CHUNK_PATH_LEN,
@@ -41,12 +41,14 @@ export const CONFIG = {
    * of the chase); later levels speed up faster, and speed-up power tiles shift it
    * further (see `currentFlowMs`).
    */
-  flowIntervalMs: 2400,
-  flowSpeedupPerLevel: 200,
-  minFlowIntervalMs: 700,
-  maxFlowIntervalMs: 3200,
-  /** Once a finished pipe connects the toilet to the works, the flow zooms. */
-  superFlowMs: 110,
+  /** The spill ACCELERATES as it's contained: it starts a trickle (set-up time) and ramps to a
+   *  frantic chase by the time the dump's nearly diverted. `flowIntervalMs` is the opening (slow)
+   *  ms/segment; `flowFastMs` is the rate at 100% contained. The whole ramp shifts faster per level. */
+  flowIntervalMs: 1900,
+  flowFastMs: 520,
+  flowSpeedupPerLevel: 110,
+  minFlowIntervalMs: 400,
+  maxFlowIntervalMs: 2400,
   sourceCol: 3,
 
   // --- pond / tug-of-war: Water Quality vs £ Profit (balance 0..1 = quality) ---
@@ -87,6 +89,11 @@ export const CONFIG = {
   // --- bucket-1 powers ---
   scorePower: 1000, // bonus points a score marker grants (× its 2/3/4 magnitude)
   freezeMs: 3500, // how long a freeze marker pauses the flow
+
+  // --- bucket-2 powers ---
+  rainMs: 4500, // how long a rain marker pours (obscures the view)
+  rainHealPerSec: 0.06, // water-quality recovered per second while it rains
+  blitzCount: 6, // how many free random pipe pieces a blitz scatters into empty tiles
 
   // --- bosses: the fatberg + the dynamite that clears it ---
   /** First level a fatberg boss can appear. */
@@ -130,6 +137,8 @@ export class Game {
   private deadFish = 0;
   /** While `elapsed < frozenUntil`, the flow is paused (a freeze marker). */
   private frozenUntil = 0;
+  /** While `elapsed < rainingUntil`, rain pours (obscures the view, heals quality). */
+  private rainingUntil = 0;
   /** Cosmetic running shareholder-profit figure (£). */
   profitPounds = 0;
   /** Open ends currently spilling (empty while contained). */
@@ -299,6 +308,11 @@ export class Game {
   /** Whether a freeze marker currently has the flow paused (for the scene's ice overlay). */
   get frozen(): boolean {
     return this.state === "FLOWING" && this.elapsed < this.frozenUntil;
+  }
+
+  /** Whether rain is currently pouring (for the scene's rain overlay). */
+  get raining(): boolean {
+    return this.state === "FLOWING" && this.elapsed < this.rainingUntil;
   }
 
   /** The piece the player will place next (front of queue). */
@@ -640,6 +654,11 @@ export class Game {
       this.nextFlowAt += dtMs;
     }
 
+    // RAIN: fresh water dilutes the river — quality recovers while it pours (dead fish stay dead).
+    if (this.state === "FLOWING" && this.elapsed < this.rainingUntil) {
+      this.adjustBalance(CONFIG.rainHealPerSec * (dtMs / 1000));
+    }
+
     if (this.state === "COUNTDOWN") {
       if (this.elapsed < CONFIG.countdownMs) return;
       this.state = "FLOWING";
@@ -745,11 +764,11 @@ export class Game {
   }
 
   private effectiveFlowMs(): number {
-    const base = CONFIG.flowIntervalMs - (this.level - 1) * CONFIG.flowSpeedupPerLevel;
-    return Math.max(
-      CONFIG.minFlowIntervalMs,
-      Math.min(CONFIG.maxFlowIntervalMs, base + this.flowMod),
-    );
+    // accelerate with how much of the dump is already contained: trickle -> frantic
+    const frac = Math.min(1, this.overflowContained / this.overflowTotal);
+    const ramp = CONFIG.flowIntervalMs + (CONFIG.flowFastMs - CONFIG.flowIntervalMs) * frac;
+    const base = ramp - (this.level - 1) * CONFIG.flowSpeedupPerLevel;
+    return Math.max(CONFIG.minFlowIntervalMs, Math.min(CONFIG.maxFlowIntervalMs, base + this.flowMod));
   }
 
   /** Advance the flood one ring: drain for current leaks, then fill the next ring. */
@@ -821,6 +840,7 @@ export class Game {
   /** Apply a power's effect and emit its event (shared by real markers and the dev key). */
   private firePower(power: PowerType, mag: number, c: Coord): void {
     let bonus: number | undefined; // points awarded (score marker) — carried to the scene
+    let coords: Coord[] | undefined; // tiles touched (blitz) — carried to the scene
     switch (power) {
       case "speed-up":
         this.flowMod += CONFIG.speedUpDeltaMs * mag;
@@ -842,8 +862,40 @@ export class Game {
       case "poison":
         this.killOneFish(); // a fish dies instantly
         break;
+      case "rain":
+        this.rainingUntil = this.elapsed + CONFIG.rainMs; // pours: obscures the view, heals quality
+        break;
+      case "blitz":
+        coords = this.blitzScatter(c); // free random pipe OR bonus markers into nearby tiles
+        break;
     }
-    this.events.push({ kind: "power", power, coord: c, value: bonus });
+    this.events.push({ kind: "power", power, coord: c, value: bonus, coords });
+  }
+
+  /** Blitz: a coin-flip between two chaotic leg-ups, scattered into empty tiles near the flow
+   *  front — either free random PIPE pieces, or bonus POWER markers (a good/poison mix the
+   *  player can still choose to route through or around). Returns the tiles touched (for the
+   *  scene's strike + pop-in). */
+  private blitzScatter(near: Coord): Coord[] {
+    const touched: Coord[] = [];
+    const empties: Coord[] = [];
+    for (let dr = -1; dr <= 4; dr++) {
+      for (let col = 0; col < CONFIG.cols; col++) {
+        const cell = { row: near.row + dr, col };
+        if (cell.row >= 1 && this.grid.isEmpty(cell)) empties.push(cell);
+      }
+    }
+    const dropPowers = this.rng() < 0.5;
+    for (let i = 0; i < CONFIG.blitzCount && empties.length; i++) {
+      const cell = empties.splice(Math.floor(this.rng() * empties.length), 1)[0];
+      if (dropPowers) {
+        this.powerMarkers.set(keyOf(cell), { power: randomPower(this.rng), mag: 2 + Math.floor(this.rng() * 3) });
+      } else {
+        this.grid.place(cell, randomPiece(this.rng));
+      }
+      touched.push(cell);
+    }
+    return touched;
   }
 
   /** Drain the flow events accumulated since the last call (the scene shows toasts). */

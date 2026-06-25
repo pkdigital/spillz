@@ -61,9 +61,10 @@ export function teesForLevel(level: number): number {
  * depth so later runs demand real routing.
  */
 export function directnessForLevel(level: number): number {
-  // moderate, not greedy: the path always descends (forward-only) but weaves a little
-  // for variety. Higher early = gentler/straighter; it loosens with depth.
-  return Math.max(0.3, 0.62 - (level - 1) * 0.05);
+  // dialled back: the queue no longer spoon-feeds a near-straight route — it weaves more, so the
+  // forced pieces demand real placement decisions. Still descends (forward-only); loosens further
+  // with depth. (The flow accelerates, so awkward pieces under time pressure is the puzzle.)
+  return Math.max(0.22, 0.42 - (level - 1) * 0.05);
 }
 
 /** How many fish live in this level's pond — the run score is the total saved. */

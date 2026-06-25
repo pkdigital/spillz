@@ -73,6 +73,8 @@ const POWER_SPRITE: Record<PowerType, string> = {
   score: "power-star",
   freeze: "power-snowflake",
   poison: "power-poison",
+  rain: "power-rain",
+  blitz: "power-blitz",
 };
 
 /** Marker frame colour — good powers read friendly, the poison hazard reads as a warning. */
@@ -83,6 +85,8 @@ const POWER_TINT: Record<PowerType, number> = {
   score: 0xffd24a,
   freeze: 0x8fe3ff,
   poison: 0xff5c5c,
+  rain: 0x7fb8ff,
+  blitz: 0xffe14a,
 };
 
 const TOAST_MS = 1700;
@@ -260,6 +264,8 @@ export class GameScene extends Phaser.Scene {
   private smokePuffs: { x: number; y: number; vy: number; r: number; born: number; life: number }[] = [];
   /** Floating "+N BONUS" score pops that rise and fade (score markers). */
   private scorePops: { x: number; y: number; value: number; born: number }[] = [];
+  /** Lightning strikes that zap each blitzed tile in (row/col so they track the scroll). */
+  private blitzStrikes: { row: number; col: number; born: number; seed: number }[] = [];
   /** Hit-rect of the end-of-level dialog button (null when no dialog is shown). */
   private endButton: { x: number; y: number; w: number; h: number } | null = null;
   /** Hit-rect of the pre-run Start button (null once the run has begun). */
@@ -323,6 +329,8 @@ export class GameScene extends Phaser.Scene {
     this.load.image("power-star", "assets/power/star.png");
     this.load.image("power-snowflake", "assets/power/snowflake.png");
     this.load.image("power-poison", "assets/power/poison.png");
+    this.load.image("power-rain", "assets/power/rain.png");
+    this.load.image("power-blitz", "assets/power/lightning.png");
     this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 256, height: 256 });
     this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
     this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
@@ -362,6 +370,7 @@ export class GameScene extends Phaser.Scene {
     this.blastBits = [];
     this.smokePuffs = [];
     this.scorePops = [];
+    this.blitzStrikes = [];
     this.endButton = null;
     this.startButton = null;
     this.tallyStart = 0;
@@ -460,7 +469,7 @@ export class GameScene extends Phaser.Scene {
     });
     this.input.keyboard?.on("keydown-D", () => this.model.killFish());
     this.input.keyboard?.on("keydown-P", () => {
-      const cycle: PowerType[] = ["score", "freeze", "poison", "speed-up"];
+      const cycle: PowerType[] = ["score", "freeze", "poison", "rain", "blitz", "speed-up"];
       const power = cycle[this.devPowerIdx % cycle.length];
       this.devPowerIdx++;
       this.model.devFirePower(power);
@@ -629,7 +638,10 @@ export class GameScene extends Phaser.Scene {
       if (e.kind === "clog") this.spawnJunkDrop(e);
       else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
       else if (e.kind === "power" && e.power === "score") this.spawnScorePop(e.coord, e.value ?? 0);
-      else if (e.kind === "power" && e.power) this.onPowerFired(e.power);
+      else if (e.kind === "power" && e.power === "blitz") {
+        this.spawnBlitz(e.coords ?? []);
+        this.onPowerFired(e.power);
+      } else if (e.kind === "power" && e.power) this.onPowerFired(e.power);
     }
 
     // Llamatron-style instruction banners + board-reveal intro kick-off
@@ -917,6 +929,7 @@ export class GameScene extends Phaser.Scene {
     const u = this.gfxUi;
     u.clear();
     this.renderFreeze(u); // icy tint over the grid while the flow is paused
+    this.renderRain(u); // rain pour while a rain marker is active
     this.renderPond(u);
     this.renderHud(u);
     this.renderQueue(u); // after the HUD so the top-left box sits on top of it
@@ -924,6 +937,7 @@ export class GameScene extends Phaser.Scene {
     this.renderJunkDrops();
     this.renderConfetti(u);
     this.renderToast(u);
+    this.renderBlitz(u); // lightning strikes zapping blitzed tiles in
     this.renderScorePops(); // rising "+N BONUS" stars
     this.renderBanner(); // big instruction flash (hidden behind the end/start cards)
     this.renderEndDialog(u); // modal card, drawn on top of everything
@@ -1836,6 +1850,51 @@ export class GameScene extends Phaser.Scene {
     this.bannerQueue.push({ lines, hold });
   }
 
+  /** Zap each blitzed tile in: cascade a lightning strike, and pop in any that became pipe. */
+  private spawnBlitz(coords: Coord[]): void {
+    coords.forEach((c, i) => {
+      if (this.model.grid.get(c)) this.placedAnim.set(`${c.row},${c.col}`, this.clock); // a pipe -> draw in
+      this.blitzStrikes.push({ row: c.row, col: c.col, born: this.clock + i * 55, seed: hash3(c.row, c.col, 5) });
+    });
+  }
+
+  /** Forked lightning bolt + flash + radiating sparks at each blitzed tile (cascaded). */
+  private renderBlitz(g: G): void {
+    this.blitzStrikes = this.blitzStrikes.filter((s) => this.clock - s.born < 380);
+    for (const s of this.blitzStrikes) {
+      const age = this.clock - s.born;
+      if (age < 0) continue; // staggered — not struck yet
+      const x = s.col * CELL + CELL / 2;
+      const y = this.rowScreenY(s.row) + CELL / 2;
+      if (y < HUD_H - CELL || y > this.pondTop + CELL) continue;
+      const t = age / 380;
+      if (t < 0.45) {
+        const a = 1 - t / 0.45;
+        const topY = Math.max(HUD_H, y - CELL * 2.6);
+        g.lineStyle(3, 0xfff6b0, a); // the bolt: jagged segments from above down to the tile
+        let px = x;
+        let py = topY;
+        for (let k = 1; k <= 5; k++) {
+          const ny = topY + (y - topY) * (k / 5);
+          const jit = (hash3(Math.floor(s.seed * 97), k, 3) - 0.5) * CELL * 0.5 * (1 - k / 5);
+          const nx = x + jit;
+          g.lineBetween(px, py, nx, ny);
+          px = nx;
+          py = ny;
+        }
+        g.fillStyle(0xffffff, a * 0.7); // white flash at the strike point
+        g.fillCircle(x, y, CELL * 0.42 * (1 - t));
+      }
+      const sa = (1 - t) * 0.85; // radiating sparks for the whole life
+      g.lineStyle(2, 0xffe14a, sa);
+      for (let k = 0; k < 6; k++) {
+        const ang = (k / 6) * Math.PI * 2 + s.seed * 6;
+        const r0 = CELL * 0.18 + t * CELL * 0.5;
+        g.lineBetween(x + Math.cos(ang) * r0, y + Math.sin(ang) * r0, x + Math.cos(ang) * (r0 + CELL * 0.16), y + Math.sin(ang) * (r0 + CELL * 0.16));
+      }
+    }
+  }
+
   private spawnScorePop(coord: Coord, value: number): void {
     this.scorePops.push({
       x: coord.col * CELL + CELL / 2,
@@ -1869,8 +1928,27 @@ export class GameScene extends Phaser.Scene {
       score: "EXTRA SCORE!",
       freeze: "SPILL FROZEN!",
       poison: "FISH POISONED!",
+      rain: "RAIN!",
+      blitz: "PIPE BLITZ!",
     };
     this.toast = { label: LABELS[power], icon: POWER_SPRITE[power], start: this.clock };
+  }
+
+  /** Rain pouring over the grid while a rain marker is active — obscures the view (the cost),
+   *  while the water-quality meter recovers (the reward). */
+  private renderRain(g: G): void {
+    if (!this.model.raining) return;
+    const top = HUD_H;
+    const span = this.pondTop - top;
+    g.fillStyle(0x6f9fd0, 0.15); // cool wash that greys the board out
+    g.fillRect(0, top, GAME_WIDTH, span);
+    g.lineStyle(2, 0xcfe6ff, 0.5); // streaks of falling rain
+    for (let i = 0; i < 95; i++) {
+      const x = hash3(i, 0, 1) * GAME_WIDTH;
+      const spd = 380 + hash3(i, 0, 2) * 280;
+      const y = top + (((hash3(i, 0, 3) * span + (this.clock * spd) / 1000) % span) + span) % span;
+      g.lineBetween(x, y, x - 5, y + 15);
+    }
   }
 
   /** Icy wash over the grid while a freeze marker holds the flow paused. */
@@ -2214,7 +2292,7 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(3, accent, 0.95);
     g.strokeRoundedRect(px, py, pw, ph, 18);
 
-    const title = won ? "POND SAVED!" : "POND POLLUTED";
+    const title = won ? "RIVER SAVED!" : "RIVER POLLUTED";
     let body: string;
     if (won) {
       body = this.tallyText(m);
