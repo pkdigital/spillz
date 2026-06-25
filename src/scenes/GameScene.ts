@@ -898,7 +898,7 @@ export class GameScene extends Phaser.Scene {
           j.floating = true; // landed — settle and bob
           j.y = floatLine;
           j.vx = (Math.random() - 0.5) * 22;
-          if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 110) {
+          if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 380) {
             this.lastSploshAt = this.clock;
             this.sfxSplosh();
           }
@@ -2196,7 +2196,7 @@ export class GameScene extends Phaser.Scene {
   /** Throw up a little crown of droplets + a ripple where a drip hits the pond. */
   private spawnSplash(x: number, y: number, impactVy: number): void {
     // throttled, and silenced once the level's over (drips keep falling under the end card)
-    if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 110) {
+    if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 380) {
       this.lastSploshAt = this.clock;
       this.sfxSplosh();
     }
