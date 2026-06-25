@@ -74,7 +74,7 @@ const POWER_SPRITE: Record<PowerType, string> = {
 const TOAST_MS = 1700;
 
 // Mario-Kart-style "next pipe" roulette: cycle shapes rapidly, then lock in.
-const EXPLOSION_MS = 450;
+const EXPLOSION_MS = 700;
 const ROULETTE_MS = 720;
 const ROULETTE_REEL = 14; // how many pieces scroll past over a spin (eased deceleration)
 const ROULETTE_PIECES: PieceType[] = [
@@ -237,7 +237,11 @@ export class GameScene extends Phaser.Scene {
   /** Smoothed X of the next-pipe box — slides right when the action is behind it. */
   private boxX = 0;
   /** Active dynamite blasts (world row/col so they scroll with the grid). */
-  private explosions: { row: number; col: number; start: number }[] = [];
+  private explosions: { row: number; col: number; start: number; seed: number }[] = [];
+  /** Blast debris — embers (fire) and muck chunks — flung out under gravity (screen space). */
+  private blastBits: { x: number; y: number; vx: number; vy: number; r: number; color: number; born: number; life: number }[] = [];
+  /** Rising smoke puffs after a blast. */
+  private smokePuffs: { x: number; y: number; vy: number; r: number; born: number; life: number }[] = [];
   /** Hit-rect of the end-of-level dialog button (null when no dialog is shown). */
   private endButton: { x: number; y: number; w: number; h: number } | null = null;
   /** Hit-rect of the pre-run Start button (null once the run has begun). */
@@ -330,6 +334,8 @@ export class GameScene extends Phaser.Scene {
     this.pendingRestart = null;
     this.boxX = 0;
     this.explosions = [];
+    this.blastBits = [];
+    this.smokePuffs = [];
     this.endButton = null;
     this.startButton = null;
     this.tallyStart = 0;
@@ -568,13 +574,14 @@ export class GameScene extends Phaser.Scene {
     this.updateCamera(deltaMs);
     this.updateDrips(deltaMs);
     this.updateConfetti(deltaMs);
+    this.updateBlast(deltaMs);
 
     // each special tile the sewage hits: clogs tumble into the pond; newest pops a toast
     // message popups are disabled for now — keep only the physical effects
     // (junk tumbling into the pond, the dynamite blast)
     for (const e of this.model.consumeEvents()) {
       if (e.kind === "clog") this.spawnJunkDrop(e);
-      else if (e.kind === "explosion") this.explosions.push({ ...e.coord, start: this.clock });
+      else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
     }
 
     // Llamatron-style instruction banners + board-reveal intro kick-off
@@ -1116,20 +1123,109 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** Kick off a dynamite blast: fireball + shockwave (tracked by row/col so it scrolls), a burst
+   *  of ember + muck debris, rising smoke, and a camera shake for the punch. */
+  private spawnBlast(row: number, col: number): void {
+    this.explosions.push({ row, col, start: this.clock, seed: Math.random() * 6.28 });
+    const x = col * CELL + CELL / 2;
+    const y = this.rowScreenY(row) + CELL / 2;
+    for (let i = 0; i < 26; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 130 + Math.random() * 380;
+      const ember = i % 2 === 0;
+      this.blastBits.push({
+        x,
+        y,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 110, // a touch of upward bias
+        r: ember ? 2.5 + Math.random() * 4 : 5 + Math.random() * 7,
+        color: ember ? (Math.random() < 0.5 ? 0xffd24a : 0xff7a1a) : 0x4a3016, // fire vs muck
+        born: this.clock,
+        life: 520 + Math.random() * 420,
+      });
+    }
+    for (let i = 0; i < 8; i++) {
+      this.smokePuffs.push({
+        x: x + (Math.random() - 0.5) * CELL,
+        y: y + (Math.random() - 0.5) * CELL * 0.5,
+        vy: -28 - Math.random() * 46,
+        r: CELL * 0.28 + Math.random() * CELL * 0.3,
+        born: this.clock,
+        life: 700 + Math.random() * 600,
+      });
+    }
+    this.cameras.main.shake(320, 0.018);
+  }
+
+  private updateBlast(dtMs: number): void {
+    const dt = dtMs / 1000;
+    this.blastBits = this.blastBits.filter((b) => this.clock - b.born < b.life);
+    for (const b of this.blastBits) {
+      b.vy += 1100 * dt; // gravity
+      b.vx *= 0.985;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+    this.smokePuffs = this.smokePuffs.filter((s) => this.clock - s.born < s.life);
+    for (const s of this.smokePuffs) {
+      s.y += s.vy * dt;
+      s.vy *= 0.97;
+      s.r += 26 * dt;
+    }
+  }
+
+  /** A soft turbulent fireball lobe: a core disc ringed by offset blobs so the edge churns. */
+  private fireLobe(g: G, x: number, y: number, r: number, color: number, a: number, seed: number): void {
+    if (a <= 0.02) return;
+    g.fillStyle(color, a);
+    g.fillCircle(x, y, r);
+    for (let k = 0; k < 6; k++) {
+      const ang = (k / 6) * Math.PI * 2 + seed;
+      const lr = r * (0.5 + 0.22 * Math.sin(seed * 2.3 + k));
+      g.fillCircle(x + Math.cos(ang) * r * 0.72, y + Math.sin(ang) * r * 0.72, lr);
+    }
+  }
+
   private renderExplosions(g: G): void {
+    // smoke sits behind the fireball
+    for (const s of this.smokePuffs) {
+      const t = (this.clock - s.born) / s.life;
+      const a = Math.min(1, t * 4) * (1 - t) * 0.45; // fade in fast, drift out
+      if (a <= 0.02) continue;
+      g.fillStyle(0x35302b, a);
+      g.fillCircle(s.x, s.y, s.r * (0.6 + t * 0.9));
+    }
+
     this.explosions = this.explosions.filter((e) => this.clock - e.start < EXPLOSION_MS);
     for (const e of this.explosions) {
       const t = (this.clock - e.start) / EXPLOSION_MS; // 0..1
       const x = e.col * CELL + CELL / 2;
       const y = this.rowScreenY(e.row) + CELL / 2;
-      const r = CELL * (0.5 + t * 2);
+      // shockwave ring — fast, thinning, gone by mid-blast
+      if (t < 0.6) {
+        const sw = CELL * (0.4 + t * 3);
+        g.lineStyle(7 * (1 - t / 0.6), 0xffe7a0, (1 - t / 0.6) * 0.85);
+        g.strokeCircle(x, y, sw);
+      }
+      // fireball — outer orange, mid yellow, white-hot core; expands then fades
+      const fr = CELL * (0.5 + Math.min(1, t * 2.4) * 1.25);
+      const fa = 1 - Math.min(1, t * 1.25);
+      this.fireLobe(g, x, y, fr, 0xff6a16, 0.72 * fa, e.seed);
+      this.fireLobe(g, x, y, fr * 0.66, 0xffd24a, 0.9 * fa, e.seed + 2.1);
+      const ca = 1 - Math.min(1, t * 2.2);
+      if (ca > 0.02) {
+        g.fillStyle(0xfff6e0, 0.95 * ca);
+        g.fillCircle(x, y, fr * 0.42);
+      }
+    }
+
+    // embers + muck chunks on top
+    for (const b of this.blastBits) {
+      const t = (this.clock - b.born) / b.life;
       const a = 1 - t;
-      g.fillStyle(0xffd24a, 0.5 * a);
-      g.fillCircle(x, y, r);
-      g.lineStyle(5, 0xff7a1a, a);
-      g.strokeCircle(x, y, r);
-      g.fillStyle(0xffffff, 0.8 * a);
-      g.fillCircle(x, y, r * 0.3);
+      if (a <= 0.02) continue;
+      g.fillStyle(b.color, a);
+      g.fillCircle(b.x, b.y, b.r * (1 - t * 0.35));
     }
   }
 
