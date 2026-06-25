@@ -52,6 +52,18 @@ export function teesForLevel(level: number): number {
   return level < 3 ? 0 : Math.min(1 + Math.floor((level - 3) / 2), 3);
 }
 
+/**
+ * How goal-directed the queue's planned path is: 1 = it heads straight for the
+ * treatment works (so the player is handed the pieces they need), 0 = a random
+ * wander. Early levels are very direct (a fair, winnable start); it loosens with
+ * depth so later runs demand real routing.
+ */
+export function directnessForLevel(level: number): number {
+  // moderate, not greedy: the path always descends (forward-only) but weaves a little
+  // for variety. Higher early = gentler/straighter; it loosens with depth.
+  return Math.max(0.3, 0.62 - (level - 1) * 0.05);
+}
+
 /** How many fish live in this level's pond — the run score is the total saved. */
 export function fishForLevel(level: number): number {
   return Math.min(3 + level, 12); // 4 at level 1, growing, capped

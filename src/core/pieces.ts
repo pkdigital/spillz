@@ -44,7 +44,7 @@ export const PLACEABLE_PIECES: PieceType[] = [
   "bend-sw",
 ];
 
-export const POWER_TYPES: PowerType[] = ["speed-up", "speed-down"];
+export const POWER_TYPES: PowerType[] = ["speed-up"]; // the faucet always speeds the flow up
 
 export const JUNK_TYPES: JunkType[] = ["condom", "wet-wipes", "cotton-buds", "sanitary-pad"];
 

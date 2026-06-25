@@ -43,6 +43,29 @@ export interface PathStep {
 }
 
 /**
+ * Order candidate exits so the walk heads toward `target` (the works) by a fraction
+ * `directness` (1 = greedy/straight at it, 0 = fully random). This is the "AI": it
+ * hands the player the pieces that build a route to the goal, more so on early levels.
+ */
+function orderExits(
+  sides: Side[],
+  cell: Coord,
+  target: Coord,
+  directness: number,
+  rng: () => number,
+): Side[] {
+  return sides
+    .map((s) => {
+      const nx = step(cell, s);
+      const dist = Math.abs(nx.row - target.row) + Math.abs(nx.col - target.col);
+      const score = -dist + (rng() - 0.5) * (1 - directness) * 26; // jitter shrinks as directness rises
+      return { s, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .map((o) => o.s);
+}
+
+/**
  * Plan a connectable path of `length` pieces starting just below the source.
  * Every emitted piece's exit leads to an in-bounds, not-yet-used cell, so the
  * path never self-intersects, never runs off the grid, and always has an open
@@ -55,6 +78,8 @@ export function planPath(
   source: Coord,
   length: number,
   rng: () => number,
+  target?: Coord,
+  directness = 0,
 ): PathStep[] {
   const inBounds = (c: Coord) =>
     c.row >= 0 && c.row < rows && c.col >= 0 && c.col < cols;
@@ -63,7 +88,11 @@ export function planPath(
 
   const dfs = (cell: Coord, entry: Side, remaining: number): boolean => {
     visited.add(keyOf(cell));
-    for (const exit of shuffled(ALL_SIDES.filter((s) => s !== entry), rng)) {
+    // the assist (target set) never walks back UP — every piece moves toward the works,
+    // so the player is only ever handed forward-progress pieces (no useless snake-back).
+    const open = ALL_SIDES.filter((s) => s !== entry && !(target && s === Side.N));
+    const ordered = target ? orderExits(open, cell, target, directness, rng) : shuffled(open, rng);
+    for (const exit of ordered) {
       const next = step(cell, exit);
       if (!inBounds(next) || visited.has(keyOf(next))) continue; // exit must lead somewhere real
       steps.push({ cell, entry, exit, piece: pieceFor(entry, exit) });
@@ -87,8 +116,10 @@ export function connectablePath(
   source: Coord,
   length: number,
   rng: () => number,
+  target?: Coord,
+  directness = 0,
 ): PieceType[] {
-  return planPath(rows, cols, source, length, rng).map((s) => s.piece);
+  return planPath(rows, cols, source, length, rng, target, directness).map((s) => s.piece);
 }
 
 export interface ChunkOpts {
@@ -101,6 +132,10 @@ export interface ChunkOpts {
   /** Number of bonus three-way T-junction tiles to mix in. */
   tees: number;
   rng: () => number;
+  /** Cell the planned path should head toward (the works); omit for a random walk. */
+  target?: Coord;
+  /** 0..1 — how strongly the path aims at `target` (the early-level assist). */
+  directness?: number;
 }
 
 /** Splice `item` into `script` at a random index, never before index 2. */
@@ -116,11 +151,17 @@ function spliceIn(script: QueuePiece[], item: QueuePiece, rng: () => number): vo
  * of the game BOARD (see game.ts), never things you're handed.
  */
 export function buildChunk(opts: ChunkOpts): QueuePiece[] {
-  const { rows, cols, source, pathLen, crosses, tees, rng } = opts;
+  const { rows, cols, source, pathLen, crosses, tees, rng, target, directness = 0 } = opts;
 
-  const script: QueuePiece[] = connectablePath(rows, cols, source, pathLen, rng).map(
-    (type) => ({ type }),
-  );
+  const script: QueuePiece[] = connectablePath(
+    rows,
+    cols,
+    source,
+    pathLen,
+    rng,
+    target,
+    directness,
+  ).map((type) => ({ type }));
 
   for (let i = 0; i < crosses; i++) {
     spliceIn(script, { type: "cross" }, rng);

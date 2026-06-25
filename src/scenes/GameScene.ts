@@ -95,15 +95,25 @@ const JUNK_NAMES: JunkType[] = ["condom", "wet-wipes", "cotton-buds", "sanitary-
 const SURFACE_ROWS = 1; // a single row of grass at the surface
 
 // Spilled-sewage gravity drips that cascade from leaks into the pond.
-const DRIP_GRAVITY = 2200; // px/s^2
-const DRIP_SPAWN_MS = 45;
-const DRIP_MAX = 260;
+const DRIP_GRAVITY = 1300; // px/s^2 — gentle enough that the fall reads, not a flicker
+const DRIP_SPAWN_MS = 60;
+const DRIP_MAX = 200;
 interface Drip {
   x: number;
   y: number;
   vx: number;
   vy: number;
   r: number;
+}
+
+/** A splash particle thrown up when a drip hits the pond (or a spreading ripple). */
+interface Splash {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number; // ms remaining
+  ripple: boolean;
 }
 
 /** A confetti ribbon flung out on level completion. */
@@ -191,10 +201,14 @@ export class GameScene extends Phaser.Scene {
   private model!: Game;
   private gfxWorld!: G;
   private gfxUi!: G;
-  /** Dedicated, masked layer for the next-piece reel so symbols clip at the box rim. */
+  /** Dedicated, masked layer for the next-piece reel so symbols clip at the box rim.
+   *  The mask is applied ONLY while spinning — a persistent mask does a per-frame
+   *  stencil pass even when idle, which is slow on software WebGL. */
   private reelGfx!: G;
   private reelMaskG!: G;
+  private reelMask!: Phaser.Display.Masks.GeometryMask;
   private statusText!: Phaser.GameObjects.Text;
+  private fpsText!: Phaser.GameObjects.Text;
   private centerText!: Phaser.GameObjects.Text;
 
   private scrollPx = 0;
@@ -203,6 +217,7 @@ export class GameScene extends Phaser.Scene {
 
   /** Falling spilled-sewage particles (leak -> pond). */
   private drips: Drip[] = [];
+  private splashes: Splash[] = [];
   private dripTimer = 0;
   /** Unflushables tumbling into the pond after being flowed through. */
   private junkDrops: JunkDrop[] = [];
@@ -262,6 +277,7 @@ export class GameScene extends Phaser.Scene {
     this.clock = 0;
     this.spriteIdx = 0;
     this.drips = [];
+    this.splashes = [];
     this.dripTimer = 0;
     this.junkDrops = [];
     this.placedAnim.clear();
@@ -280,7 +296,7 @@ export class GameScene extends Phaser.Scene {
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
     this.reelGfx = this.add.graphics().setDepth(Z_UI);
     this.reelMaskG = this.add.graphics().setVisible(false);
-    this.reelGfx.setMask(this.reelMaskG.createGeometryMask());
+    this.reelMask = this.reelMaskG.createGeometryMask(); // applied only while spinning
 
     // level indicator — a top-right overlay (no black HUD box anymore)
     this.statusText = this.add
@@ -302,6 +318,11 @@ export class GameScene extends Phaser.Scene {
         lineSpacing: 12,
       })
       .setOrigin(0.5)
+      .setDepth(Z_TEXT);
+    this.fpsText = this.add // dev FPS readout (bottom-left)
+      .text(8, 8, "", { fontFamily: "monospace", fontSize: "12px", color: "#9fe" })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
       .setDepth(Z_TEXT);
     this.toastText = this.add
       .text(0, 0, "", { fontFamily: ARCADE_FONT, fontSize: "13px", color: COLORS.text })
@@ -467,13 +488,17 @@ export class GameScene extends Phaser.Scene {
   private updateDrips(dtMs: number): void {
     const dt = dtMs / 1000;
     const pondTop = this.pondTop;
-    const pondCatch = pondTop + POND_H * 0.45; // where things splash into the pond
+    const impactY = pondTop + 3; // splash at the pond's surface
+    const survivors: Drip[] = [];
     for (const d of this.drips) {
-      d.vy += DRIP_GRAVITY * dt;
+      d.vy += DRIP_GRAVITY * dt; // accelerate under gravity
       d.x += d.vx * dt;
       d.y += d.vy * dt;
+      if (d.y >= impactY) this.spawnSplash(d.x, impactY, d.vy);
+      else survivors.push(d);
     }
-    this.drips = this.drips.filter((d) => d.y < pondCatch);
+    this.drips = survivors;
+    this.updateSplashes(dtMs, pondTop);
 
     // junk falls, then FLOATS on the pond surface (it doesn't vanish)
     const floatLine = pondTop + 14;
@@ -508,8 +533,8 @@ export class GameScene extends Phaser.Scene {
           this.drips.push({
             x,
             y,
-            vx: (Math.random() - 0.5) * 50,
-            vy: 90 + Math.random() * 90,
+            vx: (Math.random() - 0.5) * 40,
+            vy: 20 + Math.random() * 40, // starts slow, gravity does the rest
             r: 3 + Math.random() * 2.5,
           });
         }
@@ -573,6 +598,7 @@ export class GameScene extends Phaser.Scene {
     const topRow = Math.max(0, Math.floor(this.scrollPx / CELL) - 1);
     const botRow = topRow + this.visRows + 2;
 
+    const fatbergCells: Coord[] = []; // drawn last so their bulges aren't erased by lower rows
     for (let r = topRow; r <= botRow; r++) {
       const y = this.rowScreenY(r);
       const surface = r < SURFACE_ROWS;
@@ -582,18 +608,23 @@ export class GameScene extends Phaser.Scene {
       for (let c = 0; c < CONFIG.cols; c++) {
         const x = c * CELL;
         if ((r + c) % 2 === 0) {
-          w.fillStyle(0xffffff, 0.016); // barely-there chequerboard placement guide
+          w.fillStyle(0xffffff, 0.008); // barely-there chequerboard placement guide
           w.fillRect(x, y, CELL, CELL);
         }
         const coord = { row: r, col: c };
         const cell = this.model.grid.get(coord);
-        if (cell) {
+        if (cell?.type === "fatberg") {
+          fatbergCells.push(coord);
+        } else if (cell) {
           this.drawCell(w, x + CELL / 2, y + CELL / 2, cell, coord);
         } else {
           const power = this.model.powerMarkerAt(coord);
           if (power) this.drawPowerMarker(w, x + CELL / 2, y + CELL / 2, power);
         }
       }
+    }
+    for (const c of fatbergCells) {
+      this.drawFatbergCell(w, c.col * CELL + CELL / 2, this.rowScreenY(c.row) + CELL / 2, c);
     }
 
     this.drawTerminalBeacon(w);
@@ -636,23 +667,7 @@ export class GameScene extends Phaser.Scene {
 
   private drawCell(g: G, cx: number, cy: number, cell: Cell, coord: Coord): void {
     if (cell.type === "fatberg") {
-      // a congealed grease boss; each tile draws an oversized lump so the 2x2 merges
-      g.fillStyle(0x000000, 0.18);
-      g.fillEllipse(cx, cy + CELL * 0.42, CELL * 0.72, CELL * 0.16); // ground shadow
-      const base = 0xd9d2c2; // greasy off-white
-      g.fillStyle(base, 1);
-      g.fillCircle(cx, cy, CELL * 0.6);
-      g.fillStyle(shade(base, 0.9), 1);
-      for (let i = 0; i < 5; i++) {
-        const a = hash3(coord.row, coord.col, i) * Math.PI * 2;
-        g.fillCircle(cx + Math.cos(a) * CELL * 0.3, cy + Math.sin(a) * CELL * 0.3, CELL * 0.17);
-      }
-      g.fillStyle(0x8a8270, 1); // embedded grime
-      for (let i = 0; i < 6; i++) {
-        const gx = cx + (hash3(coord.row, coord.col, i + 10) - 0.5) * CELL * 0.8;
-        const gy = cy + (hash3(coord.row, coord.col, i + 20) - 0.5) * CELL * 0.8;
-        g.fillCircle(gx, gy, 2.4);
-      }
+      this.drawFatbergCell(g, cx, cy, coord);
       return;
     }
     if (cell.type === "dynamite") {
@@ -827,6 +842,103 @@ export class GameScene extends Phaser.Scene {
       g.fillStyle(0xffffff, 0.8 * a);
       g.fillCircle(x, y, r * 0.3);
     }
+  }
+
+  /** One quadrant of a fatberg: bulges on its OUTER edges, merges flush on the inner
+   *  seams, and is lit across the whole 2x2 (top-left bright -> bottom-right dark). */
+  private drawFatbergCell(g: G, cx: number, cy: number, coord: Coord): void {
+    const half = CELL / 2;
+    const F = (dr: number, dc: number) =>
+      this.model.grid.get({ row: coord.row + dr, col: coord.col + dc })?.type === "fatberg";
+    const n = F(-1, 0);
+    const s = F(1, 0);
+    const w = F(0, -1);
+    const e = F(0, 1);
+    const ext = CELL * 0.07; // how far it bulges past an outer edge
+    const x0 = cx - half - (w ? 0.5 : ext);
+    const x1 = cx + half + (e ? 0.5 : ext);
+    const y0 = cy - half - (n ? 0.5 : ext);
+    const y1 = cy + half + (s ? 0.5 : ext);
+    const r = CELL * 0.46;
+    // greasy tan-grey, a touch darker toward the bottom-right of the whole mass
+    const base = shade(0xc9bd9c, 1 - 0.06 * ((n ? 1 : 0) + (w ? 1 : 0)));
+    const light = shade(base, 1.22);
+    const dark = shade(base, 0.74);
+
+    if (!s) {
+      g.fillStyle(0x000000, 0.16);
+      g.fillEllipse(cx, y1 - 1, CELL * 0.78, CELL * 0.16); // ground shadow on the bottom edge
+    }
+    // body: rounded only on OUTER corners, square on the inner seams so the 2x2 fuses
+    g.fillStyle(base, 1);
+    g.fillRoundedRect(x0, y0, x1 - x0, y1 - y0, {
+      tl: !n && !w ? r : 0,
+      tr: !n && !e ? r : 0,
+      bl: !s && !w ? r : 0,
+      br: !s && !e ? r : 0,
+    });
+    // knobbly bulges along the outer edges (deterministic, so they don't shimmer)
+    const lump = (lx: number, ly: number, lr: number, col: number) => {
+      g.fillStyle(col, 1);
+      g.fillCircle(lx, ly, lr);
+    };
+    const h = (k: number) => hash3(coord.row, coord.col, k);
+    if (!n) {
+      lump(cx - CELL * 0.18, y0 + ext, CELL * (0.18 + h(1) * 0.06), base);
+      lump(cx + CELL * 0.2, y0 + ext, CELL * (0.15 + h(2) * 0.06), base);
+    }
+    if (!s) {
+      lump(cx - CELL * 0.2, y1 - ext, CELL * (0.18 + h(3) * 0.06), base);
+      lump(cx + CELL * 0.18, y1 - ext, CELL * (0.2 + h(4) * 0.06), base);
+    }
+    if (!w) {
+      lump(x0 + ext, cy - CELL * 0.12, CELL * (0.17 + h(5) * 0.06), base);
+      lump(x0 + ext, cy + CELL * 0.2, CELL * (0.16 + h(6) * 0.06), base);
+    }
+    if (!e) {
+      lump(x1 - ext, cy - CELL * 0.2, CELL * (0.18 + h(7) * 0.06), base);
+      lump(x1 - ext, cy + CELL * 0.14, CELL * (0.18 + h(8) * 0.06), base);
+    }
+    // shading: bright rim on the N/W (lit) edges, shadow on the S/E edges.
+    // Inset away from rounded corners so the band never paints onto the background.
+    const band = CELL * 0.15;
+    if (!n) {
+      const a = x0 + (!w ? r : 0);
+      const b = x1 - (!e ? r : 0);
+      g.fillStyle(light, 0.5);
+      g.fillRect(a, y0, b - a, band);
+    }
+    if (!w) {
+      const a = y0 + (!n ? r : 0);
+      const b = y1 - (!s ? r : 0);
+      g.fillStyle(light, 0.45);
+      g.fillRect(x0, a, band, b - a);
+    }
+    if (!s) {
+      const a = x0 + (!w ? r : 0);
+      const b = x1 - (!e ? r : 0);
+      g.fillStyle(dark, 0.5);
+      g.fillRect(a, y1 - band, b - a, band);
+    }
+    if (!e) {
+      const a = y0 + (!n ? r : 0);
+      const b = y1 - (!s ? r : 0);
+      g.fillStyle(dark, 0.45);
+      g.fillRect(x1 - band, a, band, b - a);
+    }
+    if (!n && !w) {
+      g.fillStyle(0xffffff, 0.13); // glossy top-left highlight
+      g.fillEllipse(cx - CELL * 0.12, cy - CELL * 0.14, CELL * 0.42, CELL * 0.24);
+    }
+    // embedded gunk: dark grime, a couple of pale wet-wipe smears, a yellow fat globule
+    g.fillStyle(0x8d8468, 1);
+    for (let i = 0; i < 5; i++) {
+      g.fillCircle(cx + (h(i + 10) - 0.5) * CELL * 0.7, cy + (h(i + 20) - 0.5) * CELL * 0.7, 2 + h(i + 30) * 1.5);
+    }
+    g.fillStyle(0xe9e6da, 0.8);
+    g.fillEllipse(cx + (h(40) - 0.5) * CELL * 0.5, cy + (h(41) - 0.5) * CELL * 0.5, CELL * 0.18, CELL * 0.08);
+    g.fillStyle(0xd8b24a, 0.7);
+    g.fillCircle(cx + (h(42) - 0.5) * CELL * 0.5, cy + (h(43) - 0.5) * CELL * 0.5, CELL * 0.08);
   }
 
   /** A stick of dynamite with a burning fuse that shrinks as it counts down. */
@@ -1075,13 +1187,11 @@ export class GameScene extends Phaser.Scene {
    * (green = build through it, red = avoid) with the power icon floating inside.
    */
   private drawPowerMarker(g: G, cx: number, cy: number, power: PowerType): void {
-    // protest reads as good (green); speed tiles are a mystery (neutral) — you
-    // only learn faster-vs-slower from the toast when the sewage runs through.
-    const col = power === "protest" ? COLORS.protest : COLORS.mystery;
+    const col = COLORS.speed; // the faucet speeds the flow up
     const phase = cx * 0.05;
     const bob = Math.sin(this.clock / 320 + phase) * 5;
     const py = cy + bob;
-    const s = CELL * 0.3; // half-size
+    const s = CELL * 0.34; // half-size
 
     g.fillStyle(0x000000, 0.16);
     g.fillEllipse(cx, cy + CELL * 0.33, s * 1.7, s * 0.45); // ground shadow
@@ -1091,12 +1201,9 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(3, col, 0.95);
     g.strokeRoundedRect(cx - s, py - s, s * 2, s * 2, 8); // ...bright frame
 
-    const t = (this.clock / 700 + phase) % 1; // sweeping glint
-    const gx = cx - s + t * s * 2;
-    g.lineStyle(3, 0xffffff, 0.45 * Math.sin(t * Math.PI));
-    g.lineBetween(gx, py - s + 3, gx - 9, py + s - 3);
-
-    this.drawPowerBadge(g, cx, py, power, s * 0.5, Z_GRID_SPRITE + 1); // icon inside
+    // the tap pulses so it draws the eye (no sweeping glint line)
+    const pulse = 1 + 0.12 * Math.sin(this.clock / 200);
+    this.drawPowerBadge(g, cx, py, power, s * 0.82 * pulse, Z_GRID_SPRITE + 1);
   }
 
   /** Flashing "build here" prompt under the toilet at the very start. */
@@ -1149,6 +1256,7 @@ export class GameScene extends Phaser.Scene {
   private renderQueue(g: G): void {
     const m = this.model;
     this.reelGfx.clear(); // masked reel layer — redrawn only while spinning
+    this.reelGfx.clearMask(); // default: no mask (no per-frame stencil cost when idle)
     if (m.state === "WON" || m.state === "GAMEOVER") return; // hide once the level's over
 
     const front = m.currentPiece;
@@ -1185,6 +1293,7 @@ export class GameScene extends Phaser.Scene {
       this.reelMaskG.clear();
       this.reelMaskG.fillStyle(0xffffff, 1);
       this.reelMaskG.fillRoundedRect(cx - inner / 2, cy - inner / 2, inner, inner, 10);
+      this.reelGfx.setMask(this.reelMask); // clip the sliding symbols, only while spinning
 
       const sh = box; // one symbol per slot — clean slivers at the edges
       const eased = 1 - Math.pow(1 - age / ROULETTE_MS, 3); // ease-out = momentum
@@ -1297,10 +1406,60 @@ export class GameScene extends Phaser.Scene {
 
   private renderDrips(g: G): void {
     for (const d of this.drips) {
-      g.fillStyle(0x000000, 0.18);
-      g.fillCircle(d.x + 1, d.y + 1, d.r); // tiny drop shadow
+      // stretch the drop along its fall so the motion reads (a teardrop streak)
+      const stretch = Math.min(2.4, 1 + Math.abs(d.vy) / 700);
       g.fillStyle(COLORS.sewage, 0.95);
-      g.fillCircle(d.x, d.y, d.r);
+      g.fillEllipse(d.x, d.y, d.r * 2, d.r * 2 * stretch);
+    }
+    this.renderSplashes(g);
+  }
+
+  /** Throw up a little crown of droplets + a ripple where a drip hits the pond. */
+  private spawnSplash(x: number, y: number, impactVy: number): void {
+    if (this.splashes.length > 120) return;
+    this.splashes.push({ x, y, vx: 0, vy: 0, life: 420, ripple: true });
+    const n = 3 + Math.floor(Math.random() * 3);
+    const power = Math.min(1, impactVy / 1400);
+    for (let i = 0; i < n; i++) {
+      this.splashes.push({
+        x,
+        y,
+        vx: (Math.random() - 0.5) * 120,
+        vy: -(90 + Math.random() * 120) * (0.6 + power), // up and out
+        life: 320 + Math.random() * 160,
+        ripple: false,
+      });
+    }
+  }
+
+  private updateSplashes(dtMs: number, pondTop: number): void {
+    if (this.splashes.length === 0) return;
+    const dt = dtMs / 1000;
+    const out: Splash[] = [];
+    for (const s of this.splashes) {
+      s.life -= dtMs;
+      if (s.life <= 0) continue;
+      if (!s.ripple) {
+        s.vy += DRIP_GRAVITY * dt;
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+        if (s.y > pondTop + 4 && s.vy > 0) continue; // fallen back into the pond
+      }
+      out.push(s);
+    }
+    this.splashes = out;
+  }
+
+  private renderSplashes(g: G): void {
+    for (const s of this.splashes) {
+      if (s.ripple) {
+        const t = 1 - s.life / 420; // 0..1
+        g.lineStyle(2, 0xffffff, (1 - t) * 0.5);
+        g.strokeEllipse(s.x, s.y, 8 + t * 34, 3 + t * 12);
+      } else {
+        g.fillStyle(COLORS.sewage, Math.min(0.95, s.life / 320));
+        g.fillCircle(s.x, s.y, 2.4);
+      }
     }
   }
 
@@ -1413,6 +1572,7 @@ export class GameScene extends Phaser.Scene {
     const m = this.model;
     // level + live fish count (top-right overlay, no black HUD box)
     this.statusText.setText(`LEVEL ${m.level}\nFISH ${m.fishAlive}`);
+    this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
 

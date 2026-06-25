@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildChunk, planPath } from "../src/core/queue";
+import { buildChunk, connectablePath, planPath } from "../src/core/queue";
 import { Grid } from "../src/core/grid";
 import { floodStep } from "../src/core/flow";
 import { PIECE_OPENINGS, opposite, step } from "../src/core/pieces";
@@ -19,6 +19,31 @@ function mulberry32(seed: number): () => number {
 const ROWS = 10;
 const COLS = 7;
 const SOURCE: Coord = { row: 0, col: 3 };
+
+describe("goal-directed queue (the early-level assist)", () => {
+  it("at full directness, heads straight down the source column toward the works", () => {
+    // target straight below the source -> a greedy walk just goes down = all straight-v
+    const path = connectablePath(ROWS, COLS, SOURCE, 5, mulberry32(7), { row: 30, col: 3 }, 1);
+    expect(path).toEqual(["straight-v", "straight-v", "straight-v", "straight-v", "straight-v"]);
+  });
+
+  it("the assist never walks back up (no piece is entered from below)", () => {
+    for (let s = 1; s < 10; s++) {
+      const steps = planPath(ROWS, COLS, SOURCE, 9, mulberry32(s), { row: 30, col: 3 }, 0.5);
+      // entry === S would mean the previous cell was below it -> the path moved upward
+      expect(steps.every((st) => st.entry !== Side.S)).toBe(true);
+    }
+  });
+
+  it("directness 0 stays a random walk (not all straight down)", () => {
+    let anyTurn = false;
+    for (let s = 1; s < 8 && !anyTurn; s++) {
+      const path = connectablePath(ROWS, COLS, SOURCE, 8, mulberry32(s));
+      anyTurn = path.some((p) => p !== "straight-v");
+    }
+    expect(anyTurn).toBe(true);
+  });
+});
 
 /** Build the path on a grid and flood it; returns how many path cells the sewage reaches. */
 function flowThrough(steps: ReturnType<typeof planPath>): number {

@@ -8,6 +8,7 @@ import {
   OPENING_PATH_LEN,
   POWER_CELL_CHANCE,
   crossesForLevel,
+  directnessForLevel,
   fishForLevel,
   fishSpeciesForLevel,
   obstacleChance,
@@ -279,15 +280,21 @@ export class Game {
     const source: Coord = { row: 0, col: CONFIG.sourceCol };
     const opening = !this.openingGenerated;
     this.openingGenerated = true;
+    const pathLen = opening ? OPENING_PATH_LEN : CHUNK_PATH_LEN;
     this.script.push(
       ...buildChunk({
-        rows: CONFIG.rows,
+        // a tall, narrow planning grid so the forward-only path can DESCEND the whole
+        // chunk without bouncing off a bottom wall (which produced useless snake-back pieces)
+        rows: pathLen + 4,
         cols: CONFIG.cols,
         source,
-        pathLen: opening ? OPENING_PATH_LEN : CHUNK_PATH_LEN,
+        pathLen,
         crosses: crossesForLevel(this.level),
         tees: teesForLevel(this.level),
         rng: this.rng,
+        // aim the planned path down the source column toward the works (the assist)
+        target: { row: pathLen + 8, col: CONFIG.sourceCol },
+        directness: directnessForLevel(this.level),
       }),
     );
   }
