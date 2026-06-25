@@ -29,8 +29,7 @@ export type PieceType =
   | "source"
   | "terminal"
   | "blocker"
-  | "fatberg" // a giant multi-tile clog boss; can't build through, must blow it up
-  | "dynamite"; // a cross pipe with a lit fuse — explodes to clear adjacent fatberg
+  | "fatberg"; // a giant multi-tile clog boss; can't build through, must blow it up
 
 /** Power effects that fire once when sewage flows through the tile. */
 export type PowerType = "speed-up" | "speed-down" | "protest";
@@ -45,6 +44,8 @@ export interface Cell {
   openings: number;
   /** Optional power that fires when sewage first fills this cell. */
   power?: PowerType;
+  /** Strength multiplier of the power (2/3/4 = how much the faucet speeds the flow). */
+  powerMag?: number;
   /** Cosmetic clog variant when `type === "blocker"`. */
   junk?: JunkType;
 }
@@ -54,6 +55,9 @@ export interface QueuePiece {
   type: PieceType;
   power?: PowerType;
   junk?: JunkType;
+  /** When set, this piece carries a stick of dynamite — placing it lights a fuse
+   *  that detonates to clear an adjacent fatberg. Works on ANY piece shape. */
+  dynamite?: boolean;
 }
 
 /** Something notable the sewage flowed through this tick (drives the on-screen toast). */

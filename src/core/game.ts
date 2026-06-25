@@ -2,6 +2,7 @@ import { Grid } from "./grid";
 import { floodStep, type LeakEdge } from "./flow";
 import { buildChunk } from "./queue";
 import { opposite, randomJunk, randomPower, sidesOf, step } from "./pieces";
+import { Side } from "./types";
 import {
   CHUNK_PATH_LEN,
   OBSTACLE_START_ROW,
@@ -15,7 +16,17 @@ import {
   teesForLevel,
   terminalRow,
 } from "./levels";
-import type { Coord, FlowEvent, GameState, PowerType, QueuePiece, Side } from "./types";
+import type { Coord, FlowEvent, GameState, PieceType, PowerType, QueuePiece } from "./types";
+
+/** The 2-opening piece for a given pair of sides (caps a leak without extra ends). */
+const PIECE_FOR_OPENINGS: Record<number, PieceType> = {
+  [Side.N | Side.S]: "straight-v",
+  [Side.E | Side.W]: "straight-h",
+  [Side.N | Side.E]: "bend-ne",
+  [Side.N | Side.W]: "bend-nw",
+  [Side.S | Side.E]: "bend-se",
+  [Side.S | Side.W]: "bend-sw",
+};
 
 // ---- Tunables (all the feel knobs live here) -------------------------------
 export const CONFIG = {
@@ -68,6 +79,11 @@ export const CONFIG = {
   // --- forcing pipe through a clog/hazard pollutes (costlier than an overwrite) ---
   hazardClearPounds: 150_000,
   hazardClearHit: 0.08,
+
+  // --- purity score: a pristine pond banks points; junk + spills chip them away ---
+  levelScoreBase: 1000,
+  junkScorePenalty: 120,
+  spillScorePenalty: 25,
 
   // --- bosses: the fatberg + the dynamite that clears it ---
   /** First level a fatberg boss can appear. */
@@ -122,6 +138,8 @@ export class Game {
   /** Top-left of the current fatberg (for handing out dynamite at the right time). */
   private fatbergAnchor: Coord | null = null;
   private dynamiteGiven = false;
+  /** Earliest elapsed-ms the game may slip the player a lifeline piece again. */
+  private helpAt = 0;
   /** Membership set mirroring `filled`, for fast flood lookups. */
   private filledSet = new Set<string>();
   /** Deepest filled row (the flood frontier). */
@@ -132,7 +150,7 @@ export class Game {
   private lastBuiltRow = 0;
   private lastBuiltCol: number = CONFIG.sourceCol;
   /** Power-up markers on empty ground — build a pipe through them to trigger. */
-  private powerMarkers = new Map<string, PowerType>();
+  private powerMarkers = new Map<string, { power: PowerType; mag: number }>();
   /** The run begins (countdown starts) only once a pipe is laid under the toilet. */
   started = false;
   private elapsed = 0;
@@ -152,13 +170,19 @@ export class Game {
   /** How many fish this level's pond holds, and each one's species id. */
   private readonly levelFish: number;
   private readonly fishKindsArr: number[] = [];
-  /** Cumulative fish rescued across the whole run — the score. */
+  /** Cumulative fish rescued across the whole run. */
   fishSaved: number;
+  /** Purity points banked from completed levels (the run score). */
+  runScore: number;
+  /** This level's available purity points — junk + spills chip it away; banked on win. */
+  levelScore: number;
 
-  constructor(rng: () => number = Math.random, level = 1, fishSaved = 0) {
+  constructor(rng: () => number = Math.random, level = 1, fishSaved = 0, runScore = 0) {
     this.rng = rng;
     this.levelNumber = level;
     this.fishSaved = fishSaved;
+    this.runScore = runScore;
+    this.levelScore = CONFIG.levelScoreBase;
     this.levelFish = fishForLevel(level);
     this.grid = new Grid(CONFIG.cols);
 
@@ -203,6 +227,16 @@ export class Game {
   /** Fish still alive in the pond right now. */
   get fishAlive(): number {
     return this.levelFish - this.fishDead;
+  }
+
+  /** Dev helper: drop the quality meter just enough to kill one more fish. */
+  killFish(): void {
+    const next = this.fishDead + 1;
+    if (next >= this.levelFish) {
+      this.balance = 0; // last fish -> pond dies
+      return;
+    }
+    this.balance = Math.max(0, 0.5 - (next / this.levelFish) * 0.5);
   }
 
   get score(): number {
@@ -260,7 +294,7 @@ export class Game {
   }
 
   /** The power-up marker (if any) on the empty ground at `c`. */
-  powerMarkerAt(c: Coord): PowerType | undefined {
+  powerMarkerAt(c: Coord): { power: PowerType; mag: number } | undefined {
     return this.powerMarkers.get(keyOf(c));
   }
 
@@ -321,7 +355,8 @@ export class Game {
         } else if (roll < clog + POWER_CELL_CHANCE) {
           // power-up marker on the GROUND: build a pipe through it (good) or route
           // around it (bad). Cell stays empty/buildable until then.
-          this.powerMarkers.set(keyOf(c), randomPower(this.rng));
+          // a faucet of strength 2x / 3x / 4x — the label warns how much it speeds up
+          this.powerMarkers.set(keyOf(c), { power: randomPower(this.rng), mag: 2 + Math.floor(this.rng() * 3) });
         }
       }
       this.maybeSeedFatberg(r);
@@ -371,20 +406,21 @@ export class Game {
     const marker = this.powerMarkers.get(keyOf(c));
     if (marker) this.powerMarkers.delete(keyOf(c));
 
-    this.grid.set(c, piece.type, { power: piece.power ?? marker });
+    this.grid.set(c, piece.type, { power: piece.power ?? marker?.power, powerMag: marker?.mag });
     if (c.row > this.maxPlacedRow) this.maxPlacedRow = c.row;
     this.lastBuiltRow = c.row;
     this.lastBuiltCol = c.col;
     this.queue.shift();
     this.queue.push(this.nextScriptPiece());
 
-    if (piece.type === "dynamite") this.fuses.set(keyOf(c), CONFIG.dynamiteFuseMs); // fuse lit
+    if (piece.dynamite) this.fuses.set(keyOf(c), CONFIG.dynamiteFuseMs); // a fuse on any shape
     this.maybeGiveDynamite();
 
     if (wasClog) {
       // Clearing a clog dumps it straight into the pond and pollutes — immediately.
       this.adjustBalance(-CONFIG.hazardClearHit);
       this.profitPounds += CONFIG.hazardClearPounds;
+      this.levelScore = Math.max(0, this.levelScore - CONFIG.junkScorePenalty); // junk in the pond
       this.events.push({ kind: "clog", junk: clogJunk, coord: c });
     } else if (isOverwrite) {
       // Overwriting your OWN pipe is wasteful — shareholders profit.
@@ -405,9 +441,13 @@ export class Game {
   private maybeGiveDynamite(): void {
     if (this.dynamiteGiven || !this.fatbergAnchor) return;
     if (this.maxPlacedRow < this.fatbergAnchor.row - 4) return;
-    this.dynamiteGiven = true;
-    this.queue.splice(1, 0, { type: "dynamite" }); // next-but-one piece
-    this.queue.pop(); // keep the queue length steady
+    // strap a fuse onto the upcoming piece — whatever shape it is — so the shape
+    // is never dictated by the dynamite.
+    const piece = this.queue[1] ?? this.queue[0];
+    if (piece) {
+      piece.dynamite = true;
+      this.dynamiteGiven = true;
+    }
   }
 
   /** Whether the front-of-queue piece may legally go on cell `c`. */
@@ -535,6 +575,30 @@ export class Game {
       this.nextFlowAt = this.ringStart + this.currentFlowMs;
       if (this.state !== "FLOWING") break;
     }
+
+    if (this.state === "FLOWING") this.maybeOfferHelp();
+  }
+
+  /** Rubber-band: when the pond is nearly dead AND sewage is spilling, occasionally
+   *  slip the EXACT capping piece (a straight/bend, never a cross — extra open ends
+   *  just make more leaks) to the front of the queue so the player can recover. */
+  private maybeOfferHelp(): void {
+    if (this.fishAlive >= 2 || !this.leaking) return;
+    if (this.elapsed < this.helpAt) return;
+    this.helpAt = this.elapsed + 5000; // at most once every ~5s of trouble
+    if (this.rng() < 0.8) {
+      this.queue.unshift({ type: this.helpPiece() });
+      this.queue.pop();
+    }
+  }
+
+  /** The 2-opening piece that caps the current leak and continues toward the works. */
+  private helpPiece(): PieceType {
+    const leak = this.leaks[0];
+    if (!leak) return "straight-v";
+    const entry = opposite(leak.out); // side the cap must face back toward the spill
+    const goal = entry === Side.S ? Side.N : Side.S; // ...and continue down to the works
+    return PIECE_FOR_OPENINGS[entry | goal] ?? "straight-v";
   }
 
   /** ms left on the fuse of a dynamite tile, or undefined if it isn't armed. */
@@ -574,6 +638,22 @@ export class Game {
       this.adjustBalance(-CONFIG.explosionHit);
       this.profitPounds += CONFIG.explosionPounds;
     }
+    // wasted the dynamite (the berg still stands)? re-arm the supply so it can still be cleared
+    if (this.fatbergPlaced && this.fatbergStillStanding()) {
+      this.dynamiteGiven = false;
+    }
+  }
+
+  /** Whether any tile of this level's fatberg remains on the board. */
+  private fatbergStillStanding(): boolean {
+    const a = this.fatbergAnchor;
+    if (!a) return false;
+    for (let dr = 0; dr < 2; dr++) {
+      for (let dc = 0; dc < 2; dc++) {
+        if (this.grid.get({ row: a.row + dr, col: a.col + dc })?.type === "fatberg") return true;
+      }
+    }
+    return false;
   }
 
   private effectiveFlowMs(): number {
@@ -620,6 +700,7 @@ export class Game {
     if (n > 0) {
       this.adjustBalance(-CONFIG.spillDrainPerTick * n);
       this.profitPounds += CONFIG.spillPounds * n;
+      this.levelScore = Math.max(0, this.levelScore - CONFIG.spillScorePenalty * n); // spill chips purity
       if (this.state !== "FLOWING") return;
     }
 
@@ -639,6 +720,7 @@ export class Game {
     if (cell?.type === "terminal") {
       this.state = "WON"; // sewage reached the treatment works — pond saved!
       this.fishSaved += this.fishAlive; // bank the survivors
+      this.runScore += this.levelScore; // bank the level's remaining purity points
       return;
     }
     if (cell?.power) this.applyPower(coord, cell.power);
@@ -646,12 +728,13 @@ export class Game {
 
   /** Fire (once) the power on a freshly-filled cell, then consume it. */
   private applyPower(c: Coord, power: PowerType): void {
+    const mag = this.grid.get(c)?.powerMag ?? 1; // 2x / 3x / 4x faucet strength
     switch (power) {
       case "speed-up":
-        this.flowMod += CONFIG.speedUpDeltaMs;
+        this.flowMod += CONFIG.speedUpDeltaMs * mag;
         break;
       case "speed-down":
-        this.flowMod += CONFIG.speedDownDeltaMs;
+        this.flowMod += CONFIG.speedDownDeltaMs * mag;
         break;
       case "protest":
         this.adjustBalance(CONFIG.protestBoost);

@@ -227,7 +227,7 @@ export class GameScene extends Phaser.Scene {
   private confetti: Confetti[] = [];
   private prevState: GameState = "COUNTDOWN";
   /** Pending (re)start — deferred out of the input callback to the next tick. */
-  private pendingRestart: { level: number; fishSaved: number } | null = null;
+  private pendingRestart: { level: number; fishSaved: number; runScore: number } | null = null;
   /** Smoothed X of the next-pipe box — slides right when the action is behind it. */
   private boxX = 0;
   /** Active dynamite blasts (world row/col so they scroll with the grid). */
@@ -250,6 +250,9 @@ export class GameScene extends Phaser.Scene {
   /** Pooled sprite images, re-used each frame. */
   private sprites: Phaser.GameObjects.Image[] = [];
   private spriteIdx = 0;
+  /** Pooled text labels (e.g. the faucet 2x/3x/4x tags), re-used each frame. */
+  private labels: Phaser.GameObjects.Text[] = [];
+  private labelIdx = 0;
 
   /** Roulette bookkeeping for the "next pipe" box. */
   private prevFront: QueuePiece | undefined;
@@ -279,8 +282,8 @@ export class GameScene extends Phaser.Scene {
     this.load.image("decor-toilet", "assets/decor/toilet.png"); // drop your PNG to override
   }
 
-  create(data?: { level?: number; fishSaved?: number }): void {
-    this.model = new Game(undefined, data?.level ?? 1, data?.fishSaved ?? 0);
+  create(data?: { level?: number; fishSaved?: number; runScore?: number }): void {
+    this.model = new Game(undefined, data?.level ?? 1, data?.fishSaved ?? 0, data?.runScore ?? 0);
     this.scrollPx = 0;
     this.scrollTargetPx = 0;
     this.clock = 0;
@@ -303,6 +306,7 @@ export class GameScene extends Phaser.Scene {
     this.prevFront = undefined;
     this.rouletteStart = -9999;
     this.sprites = []; // pooled images were destroyed on restart — rebuild fresh
+    this.labels = [];
 
     this.gfxWorld = this.add.graphics();
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
@@ -350,10 +354,11 @@ export class GameScene extends Phaser.Scene {
     this.input.on("pointerdown", this.onDown, this);
     this.input.on("pointermove", this.onMove, this);
     this.input.on("pointerup", this.onUp, this);
-    // dev shortcut: press N to skip to the next level (e.g. to reach the fatberg on L3+)
+    // dev shortcuts: N = skip to next level (reach the fatberg on L3+); D = kill a fish
     this.input.keyboard?.on("keydown-N", () => {
-      this.pendingRestart = { level: this.model.level + 1, fishSaved: this.model.fishSaved };
+      this.pendingRestart = { level: this.model.level + 1, fishSaved: this.model.fishSaved, runScore: this.model.runScore };
     });
+    this.input.keyboard?.on("keydown-D", () => this.model.killFish());
   }
 
   private onDown(p: Phaser.Input.Pointer): void {
@@ -388,7 +393,7 @@ export class GameScene extends Phaser.Scene {
       const b = this.endButton; // only the dialog button advances
       if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
         const level = this.model.state === "WON" ? this.model.level + 1 : this.model.level;
-        this.pendingRestart = { level, fishSaved: this.model.fishSaved };
+        this.pendingRestart = { level, fishSaved: this.model.fishSaved, runScore: this.model.runScore };
       }
       return;
     }
@@ -642,6 +647,7 @@ export class GameScene extends Phaser.Scene {
     const w = this.gfxWorld;
     w.clear();
     this.spriteIdx = 0;
+    this.labelIdx = 0;
 
     const topRow = Math.max(0, Math.floor(this.scrollPx / CELL) - 1);
     const botRow = topRow + this.visRows + 2;
@@ -666,8 +672,8 @@ export class GameScene extends Phaser.Scene {
         } else if (cell) {
           this.drawCell(w, x + CELL / 2, y + CELL / 2, cell, coord);
         } else {
-          const power = this.model.powerMarkerAt(coord);
-          if (power) this.drawPowerMarker(w, x + CELL / 2, y + CELL / 2, power);
+          const marker = this.model.powerMarkerAt(coord);
+          if (marker) this.drawPowerMarker(w, x + CELL / 2, y + CELL / 2, marker.power, marker.mag);
         }
       }
     }
@@ -721,6 +727,7 @@ export class GameScene extends Phaser.Scene {
     this.renderEndDialog(u); // modal card, drawn on top of everything
 
     for (let i = this.spriteIdx; i < this.sprites.length; i++) this.sprites[i].setVisible(false);
+    for (let i = this.labelIdx; i < this.labels.length; i++) this.labels[i].setVisible(false);
   }
 
   // ---- tiles -----------------------------------------------------------------
@@ -728,12 +735,6 @@ export class GameScene extends Phaser.Scene {
   private drawCell(g: G, cx: number, cy: number, cell: Cell, coord: Coord): void {
     if (cell.type === "fatberg") {
       this.drawFatbergCell(g, cx, cy, coord);
-      return;
-    }
-    if (cell.type === "dynamite") {
-      this.drawPipe(g, cx, cy, cell.openings, COLORS.pipe, 0.3, this.pipeGrow(coord));
-      const fuse = this.model.fuseAt(coord);
-      if (fuse !== undefined) this.drawDynamite(g, cx, cy, fuse);
       return;
     }
     if (cell.type === "blocker") {
@@ -797,6 +798,8 @@ export class GameScene extends Phaser.Scene {
     if (cell.power) {
       this.drawPowerBadge(g, cx + CELL * 0.28, cy - CELL * 0.28, cell.power, 13, Z_GRID_SPRITE + 1);
     }
+    const fuse = this.model.fuseAt(coord); // any piece can carry a lit fuse
+    if (fuse !== undefined) this.drawDynamite(g, cx, cy, fuse);
   }
 
   /** 0..1 draw-in progress for a freshly placed pipe (1 = fully drawn). */
@@ -1305,7 +1308,7 @@ export class GameScene extends Phaser.Scene {
    * A Mario-Kart-style item box on the ground — bobbing, glinting, colour-coded
    * (green = build through it, red = avoid) with the power icon floating inside.
    */
-  private drawPowerMarker(g: G, cx: number, cy: number, power: PowerType): void {
+  private drawPowerMarker(g: G, cx: number, cy: number, power: PowerType, mag = 1): void {
     const col = COLORS.speed; // the faucet speeds the flow up
     const phase = cx * 0.05;
     const bob = Math.sin(this.clock / 320 + phase) * 5;
@@ -1322,7 +1325,22 @@ export class GameScene extends Phaser.Scene {
 
     // the tap pulses so it draws the eye (no sweeping glint line)
     const pulse = 1 + 0.12 * Math.sin(this.clock / 200);
-    this.drawPowerBadge(g, cx, py, power, s * 0.82 * pulse, Z_GRID_SPRITE + 1);
+    this.drawPowerBadge(g, cx, py - s * 0.18, power, s * 0.72 * pulse, Z_GRID_SPRITE + 1);
+    // how much it speeds the flow up: 2x / 3x / 4x
+    this.useLabel(`${mag}x`, cx, py + s * 0.62, Z_GRID_SPRITE + 2, 13);
+  }
+
+  /** A pooled text label positioned at a world point (e.g. a faucet's 2x/3x/4x tag). */
+  private useLabel(text: string, x: number, y: number, depth: number, fontPx: number): void {
+    let t = this.labels[this.labelIdx];
+    if (!t) {
+      t = this.add
+        .text(0, 0, "", { fontFamily: ARCADE_FONT, color: "#ffffff", stroke: "#06101a", strokeThickness: 4 })
+        .setOrigin(0.5);
+      this.labels[this.labelIdx] = t;
+    }
+    this.labelIdx++;
+    t.setText(text).setFontSize(fontPx).setPosition(x, y).setDepth(depth).setVisible(true);
   }
 
   /** Flashing "build here" prompt under the toilet at the very start. */
@@ -1410,7 +1428,7 @@ export class GameScene extends Phaser.Scene {
     } else {
       // the reel already left the piece centred at full size — just rest there
       this.drawPipeGlyph(g, cx, cy, PIECE_OPENINGS[front.type], glyph);
-      if (front.type === "dynamite") this.drawDynamiteBadge(g, cx, cy, glyph);
+      if (front.dynamite) this.drawDynamiteBadge(g, cx, cy, glyph);
     }
   }
 
@@ -1673,8 +1691,8 @@ export class GameScene extends Phaser.Scene {
 
   private renderHud(_g: G): void {
     const m = this.model;
-    // level + live fish count (top-right overlay, no black HUD box)
-    this.statusText.setText(`LEVEL ${m.level}\nFISH ${m.fishAlive}`);
+    // level + live score (purity banked + this level's remaining) + fish count
+    this.statusText.setText(`LEVEL ${m.level}\nSCORE ${m.runScore + m.levelScore}\nFISH ${m.fishAlive}`);
     this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
@@ -1715,9 +1733,9 @@ export class GameScene extends Phaser.Scene {
 
     const title = won ? "POND SAVED!" : "POND POLLUTED";
     const tally = won
-      ? `${m.fishAlive} FISH RESCUED\nTOTAL SAVED: ${m.fishSaved}`
-      : `${m.fishCount} FISH DIED\nTOTAL SAVED: ${m.fishSaved}`;
-    this.centerText.setPosition(GAME_WIDTH / 2, py + 92).setText(`${title}\n\n${tally}`);
+      ? `${m.fishAlive} FISH RESCUED\n+${m.levelScore} POINTS\nSCORE: ${m.runScore}`
+      : `${m.fishCount} FISH DIED\n${m.levelScore} POINTS LOST\nSCORE: ${m.runScore}`;
+    this.centerText.setPosition(GAME_WIDTH / 2, py + 86).setText(`${title}\n\n${tally}`);
 
     const bw = 240;
     const bh = 58;

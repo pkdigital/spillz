@@ -4,6 +4,7 @@ import type { Cell, Coord, JunkType, PieceType, PowerType } from "./types";
 /** Optional flavour applied when placing a cell. */
 export interface CellExtras {
   power?: PowerType;
+  powerMag?: number;
   junk?: JunkType;
 }
 
@@ -60,6 +61,7 @@ export class Grid {
   private makeCell(type: PieceType, extras: CellExtras): Cell {
     const cell: Cell = { type, openings: PIECE_OPENINGS[type] };
     if (extras.power) cell.power = extras.power;
+    if (extras.powerMag) cell.powerMag = extras.powerMag;
     if (extras.junk) cell.junk = extras.junk;
     return cell;
   }

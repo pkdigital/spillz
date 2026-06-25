@@ -14,7 +14,7 @@ export const OPENING_PATH_LEN = 20;
 export const CHUNK_PATH_LEN = 12;
 
 /** Grid row of the treatment works for a level — deeper each level. */
-export const TERMINAL_BASE_ROW = 11;
+export const TERMINAL_BASE_ROW = 9;
 export const TERMINAL_ROW_STEP = 3;
 export function terminalRow(level: number): number {
   return TERMINAL_BASE_ROW + (level - 1) * TERMINAL_ROW_STEP;
@@ -40,7 +40,7 @@ export const POWER_CELL_CHANCE = 0.05;
  * confusing piece for new players); it shows up from level 3 on.
  */
 export function crossesForLevel(level: number): number {
-  return level >= 3 ? 1 : 0;
+  return level >= 6 ? 1 : 0; // the four-way is a confusing, powerful piece — late game only
 }
 
 /**

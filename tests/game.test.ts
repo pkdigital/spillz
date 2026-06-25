@@ -88,11 +88,10 @@ describe("Game state machine", () => {
 
   it("survives longer when a valid path is built", () => {
     const g = new Game();
-    // Build a straight vertical run down the source column.
-    for (let r = 1; r < CONFIG.rows; r++) {
-      // currentPiece is random, so force a known shape via the grid directly is
-      // not allowed (queue-driven). Instead just verify placement on empties works
-      // and that flow over a built straight column advances past the source.
+    // Build a straight vertical run down the source column, but stop short of the
+    // works (leave a gap) so it isn't a completed connection — we just want to see
+    // the flow advance over a built column while staying FLOWING.
+    for (let r = 1; r < g.terminal.row - 1; r++) {
       g.grid.place({ row: r, col: CONFIG.sourceCol }, "straight-v");
     }
     g.update(CONFIG.countdownMs); // source fills

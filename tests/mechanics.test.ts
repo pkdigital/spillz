@@ -121,12 +121,28 @@ describe("bosses: fatberg + dynamite", () => {
     g.started = true; // skip the start gate so update() ticks the fuse
     // drop dynamite right next to the berg (a guaranteed-empty cell two cols over)
     const dyn = { row: berg!.row, col: berg!.col };
-    g.grid.clear(dyn); // clear that fatberg tile so we can stand the dynamite on it
-    g.grid.set(dyn, "dynamite");
+    g.grid.clear(dyn); // clear that fatberg tile so we can stand a fused pipe on it
+    g.grid.set(dyn, "straight-v"); // dynamite is now a fuse on any normal piece
     (g as unknown as { fuses: Map<string, number> }).fuses.set(`${dyn.row},${dyn.col}`, CONFIG.dynamiteFuseMs);
     g.update(CONFIG.dynamiteFuseMs + 50); // fuse burns down -> BOOM
     expect(findFatberg(g)).toBeNull(); // berg gone
     expect(g.consumeEvents().some((e) => e.kind === "explosion")).toBe(true);
+  });
+
+  it("dynamite wasted away from the fatberg leaves it standing (to be re-supplied)", () => {
+    let g = new Game(mulberry32(1), CONFIG.fatbergFromLevel);
+    let berg = findFatberg(g);
+    for (let s = 2; !berg && s < 30; s++) {
+      g = new Game(mulberry32(s), CONFIG.fatbergFromLevel);
+      berg = findFatberg(g);
+    }
+    expect(berg).not.toBeNull();
+    g.started = true;
+    // detonate at the top corner, nowhere near the (deeper) berg
+    g.grid.set({ row: 0, col: 0 }, "straight-v");
+    (g as unknown as { fuses: Map<string, number> }).fuses.set("0,0", CONFIG.dynamiteFuseMs);
+    g.update(CONFIG.dynamiteFuseMs + 50);
+    expect(findFatberg(g)).not.toBeNull(); // berg untouched -> supply re-arms
   });
 });
 
