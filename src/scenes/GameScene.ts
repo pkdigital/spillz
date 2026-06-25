@@ -720,15 +720,18 @@ export class GameScene extends Phaser.Scene {
     const dt = dtMs / 1000;
     const pondTop = this.pondTop;
     const impactY = pondTop + 3; // splash at the pond's surface
-    const survivors: Drip[] = [];
-    for (const d of this.drips) {
-      d.vy += DRIP_GRAVITY * dt; // accelerate under gravity
-      d.x += d.vx * dt;
-      d.y += d.vy * dt;
-      if (d.y >= impactY) this.spawnSplash(d.x, impactY, d.vy);
-      else survivors.push(d);
+    const frozen = this.model.frozen; // a freeze stops the leak: drips hang in mid-air
+    if (!frozen) {
+      const survivors: Drip[] = [];
+      for (const d of this.drips) {
+        d.vy += DRIP_GRAVITY * dt; // accelerate under gravity
+        d.x += d.vx * dt;
+        d.y += d.vy * dt;
+        if (d.y >= impactY) this.spawnSplash(d.x, impactY, d.vy);
+        else survivors.push(d);
+      }
+      this.drips = survivors;
     }
-    this.drips = survivors;
     this.updateSplashes(dtMs, pondTop);
 
     // junk falls, then FLOATS on the pond surface (it doesn't vanish)
@@ -752,7 +755,7 @@ export class GameScene extends Phaser.Scene {
     // keep the pond from overflowing — drop the oldest floaters
     if (this.junkDrops.length > 16) this.junkDrops.splice(0, this.junkDrops.length - 16);
 
-    if (this.model.leaking) {
+    if (this.model.leaking && !frozen) {
       this.dripTimer += dtMs;
       while (this.dripTimer >= DRIP_SPAWN_MS) {
         this.dripTimer -= DRIP_SPAWN_MS;
@@ -1070,14 +1073,16 @@ export class GameScene extends Phaser.Scene {
       return;
     }
     const s = CELL * 0.34;
+    const col = POWER_TINT[marker.power];
+    const hasLabel = marker.power === "speed-up" || marker.power === "speed-down" || marker.power === "score";
     g.fillStyle(0x000000, 0.16);
     g.fillEllipse(cx, cy + CELL * 0.33, s * 1.7, s * 0.45); // shadow
-    g.fillStyle(COLORS.speed, 0.22);
+    g.fillStyle(col, 0.22);
     g.fillRoundedRect(cx - s, cy - s, s * 2, s * 2, 8); // box (stationary frame)
-    g.lineStyle(3, COLORS.speed, 0.95);
+    g.lineStyle(3, col, 0.95);
     g.strokeRoundedRect(cx - s, cy - s, s * 2, s * 2, 8);
     for (const { dy, fade } of this.reelSlots(ci)) {
-      this.drawPowerBadge(g, cx, cy - s * 0.18 + dy, marker.power, s * 0.72, Z_GRID_SPRITE + 1, fade);
+      this.drawPowerBadge(g, cx, cy - (hasLabel ? s * 0.18 : 0) + dy, marker.power, s * 0.72, Z_GRID_SPRITE + 1, fade);
     }
   }
 
@@ -1545,6 +1550,7 @@ export class GameScene extends Phaser.Scene {
   /** Sewage actually pouring OUT of a leaking pipe's open mouth — a poo-coloured stream that
    *  wells at the end and arcs down under gravity (the falling drips below carry it to the pond). */
   private drawLeak(g: G): void {
+    const frozen = this.model.frozen; // a freeze stops the leak gushing — it ices over at the mouth
     const stream = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.55);
     for (const leak of this.model.leaks) {
       const cx = leak.from.col * CELL + CELL / 2;
@@ -1553,6 +1559,14 @@ export class GameScene extends Phaser.Scene {
       const [ux, uy] = GameScene.ARROW_VEC[leak.out];
       const ex = cx + ux * CELL * 0.5; // the open mouth sits on the cell edge
       const ey = cy + uy * CELL * 0.5;
+      if (frozen) {
+        // frozen solid: a static icy lump at the mouth, no gush
+        g.fillStyle(FROZEN_TINT, 0.95);
+        g.fillCircle(ex, ey, CELL * 0.15);
+        g.fillStyle(0xffffff, 0.45);
+        g.fillCircle(ex - CELL * 0.04, ey - CELL * 0.04, CELL * 0.05);
+        continue;
+      }
       // a continuous gout of poo, recycled along its arc via the (monotonic) flow phase
       const N = 8;
       for (let k = 0; k < N; k++) {
@@ -1642,13 +1656,12 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(3, col, 0.95);
     g.strokeRoundedRect(cx - s, py - s, s * 2, s * 2, 8); // ...bright frame
 
-    // the icon pulses so it draws the eye (no sweeping glint line)
-    const pulse = 1 + 0.12 * Math.sin(this.clock / 200);
-    this.drawPowerBadge(g, cx, py - s * 0.18, power, s * 0.72 * pulse, Z_GRID_SPRITE + 1);
     // the 2x/3x/4x magnitude only means something for the multiplier powers
-    if (power === "speed-up" || power === "speed-down" || power === "score") {
-      this.useLabel(`${mag}x`, cx, py + s * 0.62, Z_GRID_SPRITE + 2, 13);
-    }
+    const hasLabel = power === "speed-up" || power === "speed-down" || power === "score";
+    // the icon pulses so it draws the eye; nudge it up only when a label sits below it (else centre)
+    const pulse = 1 + 0.12 * Math.sin(this.clock / 200);
+    this.drawPowerBadge(g, cx, py - (hasLabel ? s * 0.18 : 0), power, s * 0.72 * pulse, Z_GRID_SPRITE + 1);
+    if (hasLabel) this.useLabel(`${mag}x`, cx, py + s * 0.62, Z_GRID_SPRITE + 2, 13);
   }
 
   /** A pooled text label positioned at a world point (e.g. a faucet's 2x/3x/4x tag). */

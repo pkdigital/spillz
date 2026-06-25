@@ -775,10 +775,21 @@ export class Game {
     if (this.overflowContained >= this.overflowTotal) this.winLevel();
   }
 
-  /** Clear the level: the overflow is fully diverted. Bank the survivors and tally the points. */
+  /** Clear the level: the overflow is fully diverted. Pond saved! Complete the pipe by banking
+   *  every GOOD bonus still sitting on it (the score markers the spill never reached), ignoring
+   *  the hazards (no poison on the victory lap), then tally the survivors + purity. */
   private winLevel(): void {
     if (this.state !== "FLOWING") return;
     this.state = "WON";
+    for (const { coord, cell } of this.grid.entries()) {
+      if (cell.power === "score") {
+        const bonus = CONFIG.scorePower * (cell.powerMag ?? 1);
+        this.runScore += bonus;
+        this.events.push({ kind: "power", power: "score", coord, value: bonus });
+        cell.power = undefined;
+      }
+      // hazards (poison) and neutral powers are skipped — the spill is contained, only good news
+    }
     this.fishSaved += this.fishAlive; // bank the survivors
     this.runScore += this.levelFishBonus + this.levelPurityBonus;
   }

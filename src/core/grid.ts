@@ -58,6 +58,16 @@ export class Grid {
     this.cells.delete(this.key(c));
   }
 
+  /** Every placed cell with its coord — for end-of-level sweeps. */
+  entries(): { coord: Coord; cell: Cell }[] {
+    const out: { coord: Coord; cell: Cell }[] = [];
+    for (const [k, cell] of this.cells) {
+      const i = k.indexOf(",");
+      out.push({ coord: { row: Number(k.slice(0, i)), col: Number(k.slice(i + 1)) }, cell });
+    }
+    return out;
+  }
+
   private makeCell(type: PieceType, extras: CellExtras): Cell {
     const cell: Cell = { type, openings: PIECE_OPENINGS[type] };
     if (extras.power) cell.power = extras.power;
