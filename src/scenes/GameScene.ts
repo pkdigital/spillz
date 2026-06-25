@@ -300,6 +300,13 @@ export class GameScene extends Phaser.Scene {
   private seenHints = new Set<string>();
   private prevStarted = false;
   private devPowerIdx = 0; // dev "P" key cycles through the power types
+  // --- juice / SFX state ---
+  private prevContained = 0; // for the per-segment flow blip
+  private prevLeaking = false; // for leak-start / cap sounds
+  private finalSurge = false; // the last-stretch "FINAL SURGE!" has fired
+  private lastTickAt = 0; // accelerating finale tick
+  private flashUntil = -1; // full-screen colour flash (surge / win)
+  private flashColor = 0xffffff;
 
   /** Pooled sprite images, re-used each frame. */
   private sprites: Phaser.GameObjects.Image[] = [];
@@ -371,6 +378,11 @@ export class GameScene extends Phaser.Scene {
     this.smokePuffs = [];
     this.scorePops = [];
     this.blitzStrikes = [];
+    this.prevContained = 0;
+    this.prevLeaking = false;
+    this.finalSurge = false;
+    this.lastTickAt = 0;
+    this.flashUntil = -1;
     this.endButton = null;
     this.startButton = null;
     this.tallyStart = 0;
@@ -507,6 +519,75 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
+  /** A tone with an optional pitch glide and start delay — the SFX building block. */
+  private tone(freq: number, durMs: number, type: OscillatorType, vol: number, endFreq?: number, delayMs = 0): void {
+    const ctx = this.audio;
+    if (!ctx || ctx.state !== "running") return;
+    try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      const now = ctx.currentTime + delayMs / 1000;
+      osc.frequency.setValueAtTime(freq, now);
+      if (endFreq !== undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(1, endFreq), now + durMs / 1000);
+      gain.gain.setValueAtTime(vol, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + durMs / 1000);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + durMs / 1000);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** A filtered white-noise burst — for clunks, splashes, hiss. */
+  private noise(durMs: number, vol: number, filterHz: number): void {
+    const ctx = this.audio;
+    if (!ctx || ctx.state !== "running") return;
+    try {
+      const n = Math.floor((ctx.sampleRate * durMs) / 1000);
+      const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const filt = ctx.createBiquadFilter();
+      filt.type = "lowpass";
+      filt.frequency.value = filterHz;
+      const gain = ctx.createGain();
+      const now = ctx.currentTime;
+      gain.gain.setValueAtTime(vol, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + durMs / 1000);
+      src.connect(filt);
+      filt.connect(gain);
+      gain.connect(ctx.destination);
+      src.start(now);
+      src.stop(now + durMs / 1000);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // ---- named game SFX (all synthesized, no assets) ----
+  private sfxPlace(): void { this.noise(55, 0.06, 2400); this.tone(170, 90, "square", 0.05, 90); } // clunk
+  private sfxFlow(pct: number): void { this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160); } // rising blip
+  private sfxLeak(): void { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); } // alarm
+  private sfxCap(): void { this.tone(260, 130, "square", 0.05, 540); } // relief clamp
+  private sfxTick(): void { this.tone(950, 32, "square", 0.04); } // finale tick
+  private sfxWin(): void { [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, "triangle", 0.06, f, i * 110)); } // fanfare
+  private sfxLose(): void { this.tone(330, 650, "sawtooth", 0.06, 80); }
+  private sfxPower(power: PowerType): void {
+    switch (power) {
+      case "score": [660, 880, 1100].forEach((f, i) => this.tone(f, 90, "triangle", 0.05, f, i * 55)); break;
+      case "freeze": this.tone(820, 420, "sine", 0.05, 200); break;
+      case "poison": this.tone(160, 300, "sawtooth", 0.06, 60); this.noise(220, 0.04, 700); break;
+      case "rain": this.noise(520, 0.05, 950); break;
+      case "blitz": this.noise(70, 0.06, 3200); this.tone(1200, 130, "square", 0.05, 220); break;
+      default: this.tone(300, 180, "square", 0.04, 900); // speed-up whoosh
+    }
+  }
+
   private onDown(p: Phaser.Input.Pointer): void {
     this.unlockAudio();
     this.dragStartX = p.x;
@@ -562,6 +643,7 @@ export class GameScene extends Phaser.Scene {
     if (coord && this.model.placePiece(coord)) {
       this.placedAnim.set(`${coord.row},${coord.col}`, this.clock); // animate it drawing in
       this.manualScrollUntil = 0; // resume auto-follow now that you've acted
+      this.sfxPlace(); // a satisfying clunk
     }
   }
 
@@ -616,15 +698,44 @@ export class GameScene extends Phaser.Scene {
     const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
     this.model.update(revealing ? 0 : deltaMs);
 
-    // level cleared: burst confetti, then wait for a tap to move on
+    // level cleared: burst confetti, fanfare, green flash, then wait for a tap to move on
     if (this.model.state === "WON" && this.prevState !== "WON") {
       this.spawnConfetti();
+      this.sfxWin();
+      this.flashUntil = this.clock + 450;
+      this.flashColor = 0x9be15d;
       this.tallyStart = this.clock; // begin the level-clear count-up
       this.tallyFishCounted = 0;
       this.tallyBonusBleepAt = 0;
       this.tallyDoneBleeped = false;
     }
+    if (this.model.state === "GAMEOVER" && this.prevState !== "GAMEOVER") {
+      this.sfxLose();
+      this.flashUntil = this.clock + 450;
+      this.flashColor = 0xff5c5c;
+    }
     this.prevState = this.model.state;
+
+    // --- juice: per-segment flow blip, leak alarm / cap, and the spill-clock finale ---
+    const m = this.model;
+    if (m.started && m.state === "FLOWING") {
+      if (m.overflowContained > this.prevContained) this.sfxFlow(m.overflowPct / 100);
+      if (m.leaking && !this.prevLeaking) { this.sfxLeak(); this.cameras.main.shake(180, 0.01); }
+      if (!m.leaking && this.prevLeaking) this.sfxCap();
+      const remaining = 1 - m.overflowContained / m.overflowTotal;
+      if (remaining <= 0.25 && !this.finalSurge) {
+        this.finalSurge = true; // one big warning that the end is near
+        this.queueBanner(["FINAL SURGE!"], 1500);
+        this.flashUntil = this.clock + 380;
+        this.flashColor = 0xff7a1a;
+      }
+      if (remaining > 0 && remaining <= 0.25) {
+        const interval = 90 + remaining * 4 * 220; // ticks speed up as it nears zero
+        if (this.clock - this.lastTickAt >= interval) { this.lastTickAt = this.clock; this.sfxTick(); }
+      }
+    }
+    this.prevContained = m.overflowContained;
+    this.prevLeaking = m.leaking;
 
     this.updateCamera(deltaMs);
     this.updateDrips(deltaMs);
@@ -637,7 +748,7 @@ export class GameScene extends Phaser.Scene {
     for (const e of this.model.consumeEvents()) {
       if (e.kind === "clog") this.spawnJunkDrop(e);
       else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
-      else if (e.kind === "power" && e.power === "score") this.spawnScorePop(e.coord, e.value ?? 0);
+      else if (e.kind === "power" && e.power === "score") { this.spawnScorePop(e.coord, e.value ?? 0); this.sfxPower("score"); }
       else if (e.kind === "power" && e.power === "blitz") {
         this.spawnBlitz(e.coords ?? []);
         this.onPowerFired(e.power);
@@ -939,6 +1050,7 @@ export class GameScene extends Phaser.Scene {
     this.renderToast(u);
     this.renderBlitz(u); // lightning strikes zapping blitzed tiles in
     this.renderScorePops(); // rising "+N BONUS" stars
+    this.renderFlash(u); // full-screen surge/win/lose flash
     this.renderBanner(); // big instruction flash (hidden behind the end/start cards)
     this.renderEndDialog(u); // modal card, drawn on top of everything
     this.renderStartOverlay(u); // pre-run Start screen (mutually exclusive with the end card)
@@ -1921,6 +2033,7 @@ export class GameScene extends Phaser.Scene {
 
   /** A power tile just fired: pop a labelled toast (the model already applied the effect). */
   private onPowerFired(power: PowerType): void {
+    this.sfxPower(power);
     const LABELS: Record<PowerType, string> = {
       "speed-up": "SPILL SURGE!",
       "speed-down": "SPILL EASED",
@@ -1949,6 +2062,14 @@ export class GameScene extends Phaser.Scene {
       const y = top + (((hash3(i, 0, 3) * span + (this.clock * spd) / 1000) % span) + span) % span;
       g.lineBetween(x, y, x - 5, y + 15);
     }
+  }
+
+  /** A brief full-screen colour flash (surge warning / win / lose) that fades out fast. */
+  private renderFlash(g: G): void {
+    const left = this.flashUntil - this.clock;
+    if (left <= 0) return;
+    g.fillStyle(this.flashColor, Math.min(0.5, left / 900));
+    g.fillRect(0, 0, GAME_WIDTH, this.viewH);
   }
 
   /** Icy wash over the grid while a freeze marker holds the flow paused. */
@@ -2219,18 +2340,19 @@ export class GameScene extends Phaser.Scene {
    *  clockwise as you contain the overflow; empties to green when the whole spill is contained. */
   private renderSpillClock(g: G): void {
     const m = this.model;
-    const R = 22;
-    const ccx = GAME_WIDTH - R - 14;
-    const ccy = R + 10;
     const remaining = Math.max(0, 1 - m.overflowContained / m.overflowTotal); // 1 -> 0
+    const urgent = remaining > 0 && remaining <= 0.25;
+    // in the final stretch the clock swells and throbs so the ending is unmissable
+    const R = 22 * (urgent ? 1.25 + 0.12 * Math.sin(this.clock / 90) : 1);
+    const ccx = GAME_WIDTH - 22 - 14;
+    const ccy = 22 + 12;
 
     g.fillStyle(0x06101a, 0.85);
     g.fillCircle(ccx, ccy, R + 3); // dark face
     if (remaining > 0.001) {
       const start = -Math.PI / 2; // 12 o'clock
       const end = start + remaining * Math.PI * 2;
-      const urgent = remaining <= 0.2;
-      const a = urgent ? 0.75 + 0.25 * Math.sin(this.clock / 110) : 0.92;
+      const a = urgent ? 0.7 + 0.3 * Math.sin(this.clock / 80) : 0.92;
       g.fillStyle(0xff5c5c, a); // red = spill still to contain
       g.slice(ccx, ccy, R, start, end, false);
       g.fillPath();
