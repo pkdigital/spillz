@@ -23,14 +23,15 @@ export const CONFIG = {
   cols: 7,
   queueLength: 5,
   /** Seconds of lead time before the sewage starts oozing (Pipe Mania's start countdown). */
-  countdownMs: 5000,
+  countdownMs: 7000,
   /**
    * Milliseconds per pipe segment filled at level 1. THIS is the base flow rate.
-   * Higher = slower. Level 1 is a deliberate trickle; later levels speed up, and
-   * speed-up/down power tiles shift it further (see `currentFlowMs`).
+   * Higher = slower. Level 1 is a deliberate trickle (forgiving so you can keep ahead
+   * of the chase); later levels speed up faster, and speed-up power tiles shift it
+   * further (see `currentFlowMs`).
    */
-  flowIntervalMs: 1800,
-  flowSpeedupPerLevel: 150,
+  flowIntervalMs: 2400,
+  flowSpeedupPerLevel: 200,
   minFlowIntervalMs: 700,
   maxFlowIntervalMs: 3200,
   /** Once a finished pipe connects the toilet to the works, the flow zooms. */
@@ -390,6 +391,12 @@ export class Game {
       this.profitPounds += CONFIG.overwritePounds;
       this.adjustBalance(-CONFIG.overwriteHit);
     }
+
+    // Completing the route to the works takes effect NOW: pull the next flow tick
+    // forward so the super-speed dash starts immediately (no waiting a slow tick).
+    if (this.state === "FLOWING" && this.isConnectedToTerminal()) {
+      this.nextFlowAt = Math.min(this.nextFlowAt, this.elapsed);
+    }
     return true;
   }
 
@@ -454,6 +461,38 @@ export class Game {
   /** Back-compat: a single leak target (the first). */
   get leakTarget(): Coord | null {
     return this.leakTargets[0] ?? null;
+  }
+
+  /**
+   * The build frontier: every empty, in-bounds cell that an OPEN end of the
+   * source-connected pipe network points into — i.e. where the next piece should
+   * go to extend the pipe. Drives the always-on "lay it here" placement hints.
+   */
+  get buildFrontier(): { cell: Coord; dir: Side }[] {
+    const start: Coord = { row: 0, col: CONFIG.sourceCol };
+    const seen = new Set<string>([keyOf(start)]);
+    const stack: Coord[] = [start];
+    const out: { cell: Coord; dir: Side }[] = [];
+    const tseen = new Set<string>();
+    while (stack.length) {
+      const c = stack.pop()!;
+      const cell = this.grid.get(c);
+      if (!cell) continue;
+      for (const dir of sidesOf(cell.openings)) {
+        const nb = step(c, dir);
+        const nbCell = this.grid.get(nb);
+        if (nbCell) {
+          if ((nbCell.openings & opposite(dir)) !== 0 && !seen.has(keyOf(nb))) {
+            seen.add(keyOf(nb)); // joined pipe — keep walking the network
+            stack.push(nb);
+          }
+        } else if (this.grid.inBounds(nb) && !tseen.has(keyOf(nb))) {
+          tseen.add(keyOf(nb)); // open end -> empty cell; `dir` is the way the pipe extends
+          out.push({ cell: nb, dir });
+        }
+      }
+    }
+    return out;
   }
 
   private isLeakCell(c: Coord): boolean {

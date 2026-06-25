@@ -263,6 +263,7 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("power-fist", "assets/power/fist.svg", { width: 48, height: 48 });
     this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 256, height: 256 });
     this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
+    this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
     for (let i = 1; i <= 5; i++) {
       this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 96, height: 96 });
     }
@@ -568,7 +569,7 @@ export class GameScene extends Phaser.Scene {
     size: number,
     depth: number,
     rot = 0,
-    opts?: { flipX?: boolean; flipY?: boolean; tint?: number },
+    opts?: { flipX?: boolean; flipY?: boolean; tint?: number; alpha?: number },
   ): boolean {
     if (!this.textures.exists(key)) return false;
     let img = this.sprites[this.spriteIdx];
@@ -579,6 +580,7 @@ export class GameScene extends Phaser.Scene {
     this.spriteIdx++;
     img.setTexture(key).setPosition(x, y).setDepth(depth).setRotation(rot).setVisible(true);
     img.setFlipX(opts?.flipX ?? false).setFlipY(opts?.flipY ?? false);
+    img.setAlpha(opts?.alpha ?? 1);
     if (opts?.tint !== undefined) img.setTint(opts.tint);
     else img.clearTint();
     // fit within a `size` box, preserving the texture's aspect ratio (so a portrait
@@ -628,7 +630,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.drawTerminalBeacon(w);
-    this.drawStartHint(w);
+    this.drawBuildHints();
 
     const ringStart = this.model.ringStart;
     const progress = this.model.fillProgress;
@@ -1087,37 +1089,56 @@ export class GameScene extends Phaser.Scene {
     const lite = shade(base, 1.18);
     const exits = sidesOf(openings).filter((s) => s !== entry) as Side[];
 
+    const ph = hash3(coord.row, coord.col, 5);
+    const point = (side: Side, distFromHub: number): [number, number] => {
+      if (side === Side.N) return [cx, cy - distFromHub];
+      if (side === Side.S) return [cx, cy + distFromHub];
+      if (side === Side.W) return [cx - distFromHub, cy];
+      return [cx + distFromHub, cy];
+    };
+
     g.fillStyle(base, 1);
     let hubWet = entry === null;
     if (entry === null) {
-      for (const ex of exits) this.fillArmFromHub(g, cx, cy, ex, half * p, t);
+      const L = half * p;
+      for (const ex of exits) {
+        this.fillArmFromHub(g, cx, cy, ex, L, t);
+        const [fx, fy] = point(ex, L);
+        this.flowAlong(g, cx, cy, fx, fy, dark, lite, t, ph + ex * 0.11); // hub -> front
+      }
       g.fillRect(cx - t / 2, cy - t / 2, t, t);
     } else {
       const q1 = Math.min(1, p * 2);
-      this.fillArmFromEdge(g, cx, cy, entry, half * q1, t);
+      const Le = half * q1;
+      this.fillArmFromEdge(g, cx, cy, entry, Le, t);
+      const [ex0, ey0] = point(entry, half); // the cell edge
+      const [ex1, ey1] = point(entry, half - Le); // the advancing front
+      this.flowAlong(g, ex0, ey0, ex1, ey1, dark, lite, t, ph); // edge -> front (inflow)
       if (p >= 0.5) {
         hubWet = true;
         g.fillRect(cx - t / 2, cy - t / 2, t, t);
-        const q2 = (p - 0.5) * 2;
-        for (const ex of exits) this.fillArmFromHub(g, cx, cy, ex, half * q2, t);
+        const Lx = half * (p - 0.5) * 2;
+        for (const ex of exits) {
+          this.fillArmFromHub(g, cx, cy, ex, Lx, t);
+          const [fx, fy] = point(ex, Lx);
+          this.flowAlong(g, cx, cy, fx, fy, dark, lite, t, ph + ex * 0.11); // hub -> front
+        }
       }
-      // a blob of poo riding the incoming front so it reads as flowing, not a progress bar
-      const d = half * q1;
-      let bx = cx;
-      let by = cy;
-      if (entry === Side.N) by = cy - half + d;
-      else if (entry === Side.S) by = cy + half - d;
-      else if (entry === Side.W) bx = cx - half + d;
-      else bx = cx + half - d;
-      g.fillStyle(lite, 0.4);
-      g.fillCircle(bx, by, t * 0.28);
     }
-    // textured core once the hub is wet — matches the settled tile so completion is seamless
     if (hubWet) {
-      g.fillStyle(dark, 0.28);
+      g.fillStyle(dark, 0.28); // textured core, matches a settled tile
       g.fillCircle(cx, cy, t * 0.34);
-      g.fillStyle(lite, 0.4);
-      g.fillCircle(cx + Math.sin(this.clock / 360) * 2, cy - 2, t * 0.22);
+    }
+  }
+
+  /** Drifting poo specks flowing from A to B (used to animate the filling part of a tile). */
+  private flowAlong(g: G, ax: number, ay: number, bx: number, by: number, dark: number, lite: number, t: number, ph: number): void {
+    for (let k = 0; k < 2; k++) {
+      const f = (this.clock / 1400 + ph + k * 0.5) % 1;
+      const a = Math.sin(f * Math.PI) * 0.5; // fade in at A, out at B (the front)
+      if (a <= 0.03) continue;
+      g.fillStyle(k === 0 ? lite : dark, a);
+      g.fillCircle(ax + (bx - ax) * f, ay + (by - ay) * f, t * 0.26);
     }
   }
 
@@ -1153,6 +1174,46 @@ export class GameScene extends Phaser.Scene {
       g.fillCircle(cx + dx, cy + dy, CELL * 0.12 * (0.6 + pulse * 0.6));
       g.fillStyle(COLORS.leak, 0.45);
       g.fillCircle(cx + dx * 1.25, cy + dy * 1.25, CELL * 0.1);
+    }
+  }
+
+  /** Always-on, subtle white "lay the next piece here" hints on the build frontier
+   *  (including the very first cell under the toilet). Cells that are actively
+   *  leaking are skipped — those get the loud gold markers instead. */
+  private drawBuildHints(): void {
+    const leakSet = new Set(this.model.leakTargets.map((c) => `${c.row},${c.col}`));
+    const onScreen = (y: number) => y >= HUD_H - CELL && y <= this.pondTop;
+    // the SVG points NORTH; rotate it to point the way the pipe extends, then march
+    // 3 of them in that direction (fading) like the plughole's concentric rings
+    const ROT: Record<number, number> = {
+      [Side.N]: 0,
+      [Side.E]: Math.PI / 2,
+      [Side.S]: Math.PI,
+      [Side.W]: -Math.PI / 2,
+    };
+    const VEC: Record<number, [number, number]> = {
+      [Side.N]: [0, -1],
+      [Side.S]: [0, 1],
+      [Side.E]: [1, 0],
+      [Side.W]: [-1, 0],
+    };
+    for (const { cell: t, dir } of this.model.buildFrontier) {
+      if (leakSet.has(`${t.row},${t.col}`)) continue;
+      const y = this.rowScreenY(t.row);
+      if (!onScreen(y)) continue;
+      const cx = t.col * CELL + CELL / 2;
+      const cy = y + CELL / 2;
+      const [vx, vy] = VEC[dir];
+      for (let k = 0; k < 3; k++) {
+        const phase = (this.clock / 850 + k / 3) % 1;
+        const a = Math.sin(phase * Math.PI) * 0.9; // fade IN at the back, out at the front
+        if (a <= 0.03) continue;
+        const off = (phase - 0.5) * CELL * 0.6; // marches along the connect direction
+        // high z-order so the hint sits on top of clogs / fatbergs in the way
+        this.useSprite("hint", cx + vx * off, cy + vy * off, CELL * 0.4, Z_UI_SPRITE + 2, ROT[dir], {
+          alpha: a,
+        });
+      }
     }
   }
 
@@ -1207,22 +1268,6 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Flashing "build here" prompt under the toilet at the very start. */
-  private drawStartHint(g: G): void {
-    if (this.model.placedRow > 0) return; // already started
-    const cell = { row: 1, col: CONFIG.sourceCol };
-    if (!this.model.grid.isEmpty(cell)) return;
-    const x = cell.col * CELL;
-    const y = this.rowScreenY(cell.row);
-    const pulse = 0.5 + 0.5 * Math.sin(this.clock / 120);
-    g.lineStyle(3 + 3 * pulse, COLORS.current, 0.5 + 0.5 * pulse);
-    g.strokeRoundedRect(x + 5, y + 5, CELL - 10, CELL - 10, 8);
-    const cx = x + CELL / 2;
-    const cy = y + CELL / 2;
-    g.fillStyle(COLORS.current, 0.4 + 0.5 * pulse);
-    const s = CELL * 0.18;
-    g.fillTriangle(cx - s, cy - s * 0.5, cx + s, cy - s * 0.5, cx, cy + s * 0.9);
-  }
-
   /** A subtle iridescent item box: rainbow frame + faint twinkle, no movement. */
   private drawItemBox(g: G, cx: number, cy: number, size: number, hue: number): void {
     const half = size / 2;
