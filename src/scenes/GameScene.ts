@@ -301,7 +301,6 @@ export class GameScene extends Phaser.Scene {
   // --- juice / SFX state ---
   private prevContained = 0; // for the per-segment flow blip
   private prevLeaking = false; // for leak-start / cap sounds
-  private easedBanner = false; // "SPILL EASING" banner fired once per level
   private lastSploshAt = 0; // throttle the river-splash sound
   private flashUntil = -1; // full-screen colour flash (surge / win)
   private flashColor = 0xffffff;
@@ -387,7 +386,6 @@ export class GameScene extends Phaser.Scene {
     this.blitzStrikes = [];
     this.prevContained = 0;
     this.prevLeaking = false;
-    this.easedBanner = false;
     this.lastSploshAt = 0;
     this.flashUntil = -1;
     this.winDrainStart = -1;
@@ -819,11 +817,6 @@ export class GameScene extends Phaser.Scene {
       if (m.overflowContained > this.prevContained) this.sfxFlow(m.overflowPct / 100);
       if (m.leaking && !this.prevLeaking) { this.sfxLeak(); this.cameras.main.shake(180, 0.01); }
       if (!m.leaking && this.prevLeaking) this.sfxCap();
-      // the surge subsiding near the end — flashed in the banner spot
-      if (!this.easedBanner && m.overflowTotal > 0 && m.overflowContained / m.overflowTotal >= 0.75) {
-        this.easedBanner = true;
-        this.queueBanner(["SPILL EASING"], 1400);
-      }
     }
     this.prevContained = m.overflowContained;
     this.prevLeaking = m.leaking;
@@ -850,7 +843,6 @@ export class GameScene extends Phaser.Scene {
     if (this.model.started && !this.prevStarted) {
       this.runBeganAt = this.clock; // start the obstacles-spin-in / queue-slide reveal
       this.queueBanner([`LEVEL ${this.model.level}`], 1900); // level-start flash
-      this.queueBanner(["SPILL STARTING!"], 1400); // ...then the spill-starting cue (after LEVEL N)
     }
     this.prevStarted = this.model.started;
     // first fatberg of the run — flashed once it scrolls into view
@@ -2197,6 +2189,21 @@ export class GameScene extends Phaser.Scene {
     g.fillRect(0, bot - 5, GAME_WIDTH, 5);
   }
 
+  /** The live "spill clock" shown in the banner spot: a 3·2·1 before the flow, and a 3·2·1 over
+   *  the last few segments as the dump is contained. null when neither applies. */
+  private spillCountdown(): string | null {
+    const m = this.model;
+    if (m.state === "COUNTDOWN") {
+      const n = Math.ceil(m.countdownRemaining / 1000);
+      return n >= 1 ? `SPILL STARTING IN\n${n}` : null;
+    }
+    if (m.state === "FLOWING") {
+      const rem = m.overflowTotal - m.overflowContained;
+      if (rem >= 1 && rem <= 3) return `SPILL STOPPING IN\n${rem}`;
+    }
+    return null;
+  }
+
   /** Big arcade instruction flash (Llamatron-style): pops in, holds, fades; queued so several
    *  can play in turn. Hidden while a Start/Win/Lose card is up. */
   private renderBanner(): void {
@@ -2205,16 +2212,22 @@ export class GameScene extends Phaser.Scene {
       this.banner = { ...this.bannerQueue.shift()!, start: this.clock };
     }
     const age = this.banner ? this.clock - this.banner.start : 0;
+    const cy = HUD_H + (this.pondTop - HUD_H) * 0.3;
     if (!this.banner || !playing || age > this.banner.hold) {
       this.banner = null;
-      this.bannerText.setVisible(false);
+      // live spill countdowns take the banner spot once any queued banner has cleared
+      const live = playing ? this.spillCountdown() : null;
+      if (live) {
+        this.bannerText.setText(live).setPosition(GAME_WIDTH / 2, cy).setScale(1).setAlpha(1).setVisible(true);
+      } else {
+        this.bannerText.setVisible(false);
+      }
       return;
     }
     const fadeIn = Math.min(1, age / 180);
     const fadeOut = Math.min(1, Math.max(0, (this.banner.hold - age) / 450));
     const alpha = Math.min(fadeIn, fadeOut);
     const pop = age < 300 ? easeOutBack(Math.min(1, age / 300)) : 1;
-    const cy = HUD_H + (this.pondTop - HUD_H) * 0.3;
     this.bannerText
       .setText(this.banner.lines.join("\n"))
       .setPosition(GAME_WIDTH / 2, cy)
@@ -2624,7 +2637,7 @@ export class GameScene extends Phaser.Scene {
 
     const intro =
       m.level === 1
-        ? "SPILLZ\n\nWater firms pump sewage\ninto our rivers.\n\nYou can't stop them —\nonly limit the damage."
+        ? "SPILLZ\n\nWater firms pump sewage\ninto our rivers.\n\nSave as many fish\nas you can!"
         : `LEVEL ${m.level}\n\nLimit the damage.\nSave what fish you can.`;
     this.centerText.setPosition(GAME_WIDTH / 2, py + 86).setText(intro);
 
