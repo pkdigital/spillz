@@ -634,13 +634,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ---- named game SFX (sample if provided, else synthesized) ----
-  private sfxPlace(): void { this.playSfx("place", () => { this.noise(55, 0.06, 2400); this.tone(170, 90, "square", 0.05, 90); }); }
+  private sfxPlace(): void { this.playSfx("place", () => { this.noise(55, 0.025, 1400); this.tone(150, 80, "sine", 0.022, 90); }, 0.14); }
   private sfxFlow(pct: number): void { this.playSfx("flow", () => this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160), 0.35); }
   private sfxLeak(): void { this.playSfx("leak", () => { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); }); }
   private sfxCap(): void { this.playSfx("cap", () => this.tone(260, 130, "square", 0.05, 540)); }
   private sfxWin(): void { this.playSfx("win", () => [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, "triangle", 0.06, f, i * 110))); }
   private sfxLose(): void { this.playSfx("lose", () => this.tone(330, 650, "sawtooth", 0.06, 80)); }
-  private sfxSplosh(): void { this.playSfx("splosh", () => { this.noise(270, 0.08, 5200, 320, 2, 40); this.tone(700, 230, "sine", 0.045, 150); }); }
+  private sfxSplosh(): void { this.playSfx("splosh", () => { this.noise(240, 0.03, 2600, 280, 2, 40); this.tone(420, 200, "sine", 0.02, 150); }, 0.16); }
   private sfxJunk(): void { this.playSfx("junk", () => { this.noise(190, 0.09, 2400, 190, 9, 8); this.tone(150, 160, "sine", 0.05, 52); }); }
   private sfxPower(power: PowerType): void {
     const name = power === "speed-up" ? "speedup" : power;
@@ -899,7 +899,7 @@ export class GameScene extends Phaser.Scene {
           j.floating = true; // landed — settle and bob
           j.y = floatLine;
           j.vx = (Math.random() - 0.5) * 22;
-          if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 380) {
+          if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 750) {
             this.lastSploshAt = this.clock;
             this.sfxSplosh();
           }
@@ -2249,7 +2249,7 @@ export class GameScene extends Phaser.Scene {
   /** Throw up a little crown of droplets + a ripple where a drip hits the pond. */
   private spawnSplash(x: number, y: number, impactVy: number): void {
     // throttled, and silenced once the level's over (drips keep falling under the end card)
-    if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 380) {
+    if (this.model.state === "FLOWING" && this.clock - this.lastSploshAt > 750) {
       this.lastSploshAt = this.clock;
       this.sfxSplosh();
     }
