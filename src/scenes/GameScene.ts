@@ -1,4 +1,6 @@
 import Phaser from "phaser";
+import lottie, { type AnimationItem } from "lottie-web/build/player/lottie_light_canvas";
+import tankerLottie from "./tanker-lottie.json";
 import factsData from "../../data/facts.json";
 import { CONFIG, Game } from "../core/game";
 import { PIECE_OPENINGS, sidesOf, JUNK_TYPES } from "../core/pieces";
@@ -9,14 +11,13 @@ import {
   type FlowEvent,
   type GameState,
   type JunkType,
-  type PieceType,
   type PowerType,
   type QueuePiece,
 } from "../core/types";
 
 const CELL = 80;
 const HUD_H = 0; // no top bar — level + next-pipe show as overlays
-const QUEUE_H = 0; // next-pipe box is now a top-left overlay, no bottom band
+const QUEUE_H = 66; // dedicated horizontal queue band between the grid and the river
 
 const ARCADE_FONT = "'Press Start 2P', monospace";
 const POND_H = 100;
@@ -93,19 +94,6 @@ const TOAST_MS = 1700;
 
 // Mario-Kart-style "next pipe" roulette: cycle shapes rapidly, then lock in.
 const EXPLOSION_MS = 700;
-const ROULETTE_MS = 720;
-const ROULETTE_REEL = 14; // how many pieces scroll past over a spin (eased deceleration)
-const ROULETTE_PIECES: PieceType[] = [
-  "straight-v",
-  "bend-ne",
-  "straight-h",
-  "tee-nes",
-  "bend-sw",
-  "cross",
-  "bend-nw",
-  "tee-esw",
-  "bend-se",
-];
 
 const JUNK_NAMES: JunkType[] = ["condom", "wet-wipes", "cotton-buds", "sanitary-pad"];
 
@@ -134,20 +122,6 @@ interface Splash {
   ripple: boolean;
 }
 
-/** A confetti ribbon flung out on level completion. */
-interface Confetti {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  rot: number;
-  vr: number;
-  w: number;
-  h: number;
-  color: number;
-}
-
-const CONFETTI_COLORS = [0xff5c5c, 0xffd24a, 0x4ade80, 0x3fd0ff, 0xc06cff, 0xff8a3d, 0xffffff];
 
 /** An unflushable tumbling down into the pond after the sewage carried it through. */
 interface JunkDrop {
@@ -206,8 +180,16 @@ const FISH_COLORS = [0x9be15d, 0xffb347, 0x6fd3ff, 0xff8da3, 0xc792ea, 0xf6e05e]
 
 const PLACE_ANIM_MS = 170;
 const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
-const WIN_DRAIN_MS = 1500; // on a win, the pipes drain out before the results card shows
+const WIN_DRAIN_MS = 1500; // on a win, the flow eases to a stop + the pipes drain before the card
 const FACTS: { fact: string; source: string }[] = factsData.facts;
+// End-screen gut-punch: the player's single spill vs the real 2024 scale (one per level, cycled).
+const COMPARISONS: string[] = [
+  "In 2024, Thames Water alone dumped\nraw sewage for 298,081 HOURS.\nThis was one spill.",
+  "England's water firms spilled sewage for\n3.61 MILLION hours in 2024.\nThis was one of them.",
+  "There were 450,398 sewage spills in\nEngland in 2024 — 1,200 a day.\nThis was one.",
+  "In 2024 a sewage discharge began\nroughly every 30 seconds.\nThis was one.",
+  "Not one river in England is in good\noverall health. This spill is why.",
+];
 // SFX names: a real sample at assets/sfx/<name>.mp3 plays in preference to the synth fallback.
 const SFX_NAMES = ["place", "flow", "leak", "cap", "tick", "win", "lose", "splosh", "junk", "score", "freeze", "poison", "rain", "blitz", "speedup"] as const;
 
@@ -225,12 +207,13 @@ export class GameScene extends Phaser.Scene {
   private model!: Game;
   private gfxWorld!: G;
   private gfxUi!: G;
+  private lottieAnim: AnimationItem | null = null; // the win tanker (rendered to an offscreen canvas)
+  private lottieContainer: HTMLDivElement | null = null;
+  private lottiePlaying = false;
+  private gfxTop!: G; // graphics above the UI sprites (the tanker's sewage fill)
   /** Dedicated, masked layer for the next-piece reel so symbols clip at the box rim.
    *  The mask is applied ONLY while spinning — a persistent mask does a per-frame
    *  stencil pass even when idle, which is slow on software WebGL. */
-  private reelGfx!: G;
-  private reelMaskG!: G;
-  private reelMask!: Phaser.Display.Masks.GeometryMask;
   private statusText!: Phaser.GameObjects.Text;
   private fpsText!: Phaser.GameObjects.Text;
   private centerText!: Phaser.GameObjects.Text;
@@ -252,13 +235,10 @@ export class GameScene extends Phaser.Scene {
   private junkDrops: JunkDrop[] = [];
   /** cellKey -> clock time placed, for the pipe draw-in animation. */
   private placedAnim = new Map<string, number>();
-  /** Confetti ribbons + win bookkeeping for the level-clear celebration. */
-  private confetti: Confetti[] = [];
   private prevState: GameState = "COUNTDOWN";
   /** Pending (re)start — deferred out of the input callback to the next tick. */
   private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[] } | null = null;
   /** Smoothed X of the next-pipe box — slides right when the action is behind it. */
-  private boxX = 0;
   /** Active dynamite blasts (world row/col so they scroll with the grid). */
   private explosions: { row: number; col: number; start: number; seed: number }[] = [];
   /** Blast debris — embers (fire) and muck chunks — flung out under gravity (screen space). */
@@ -283,11 +263,9 @@ export class GameScene extends Phaser.Scene {
   private buttonText!: Phaser.GameObjects.Text;
   /** A real UK water-pollution fact shown on each level's start popup. */
   private factText!: Phaser.GameObjects.Text;
+  /** The end-screen real-world comparison line (the awareness gut-punch). */
+  private compareText!: Phaser.GameObjects.Text;
   // SNES-style level-clear tally (count-up + beeps)
-  private tallyStart = 0;
-  private tallyFishCounted = 0;
-  private tallyBonusBleepAt = 0;
-  private tallyDoneBleeped = false;
   private audio?: AudioContext;
 
   /** Current on-screen "Oh No. Condom!"-style toast. */
@@ -299,6 +277,9 @@ export class GameScene extends Phaser.Scene {
   private banner: { lines: string[]; start: number; hold: number } | null = null;
   private bannerQueue: { lines: string[]; hold: number }[] = [];
   private bannerText!: Phaser.GameObjects.Text;
+  private countdownLabel!: Phaser.GameObjects.Text; // small "SPILL" caption under the gauge
+  private countdownNum!: Phaser.GameObjects.Text; // the gauge's centre readout (3·2·1 / segments left)
+  private gaugeF = 0; // smoothed needle position (0 = SAFE, 1 = SPILL)
   /** One-time hints already shown THIS RUN (survives level restarts via the scene data). */
   private seenHints = new Set<string>();
   private prevStarted = false;
@@ -306,8 +287,6 @@ export class GameScene extends Phaser.Scene {
   // --- juice / SFX state ---
   private prevContained = 0; // for the per-segment flow blip
   private prevLeaking = false; // for leak-start / cap sounds
-  private finalSurge = false; // the last-stretch "FINAL SURGE!" has fired
-  private lastTickAt = 0; // accelerating finale tick
   private lastSploshAt = 0; // throttle the river-splash sound
   private flashUntil = -1; // full-screen colour flash (surge / win)
   private flashColor = 0xffffff;
@@ -322,7 +301,8 @@ export class GameScene extends Phaser.Scene {
 
   /** Roulette bookkeeping for the "next pipe" box. */
   private prevFront: QueuePiece | undefined;
-  private rouletteStart = -9999;
+  private slideOff: QueuePiece | undefined; // the piece that just left the active slot (slides off left)
+  private rouletteStart = -9999; // reused as the queue slide-start clock
 
   constructor() {
     super("GameScene");
@@ -347,6 +327,7 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
     this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
     this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
+    this.load.svg("rock", "assets/decor/rock.svg", { width: 128, height: 128 });
     for (let i = 1; i <= 5; i++) {
       this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 96, height: 96 });
       // a greyscale copy of the SAME species shape — a corpse should read as the same fish, drained
@@ -376,10 +357,8 @@ export class GameScene extends Phaser.Scene {
     this.dripTimer = 0;
     this.junkDrops = [];
     this.placedAnim.clear();
-    this.confetti = [];
     this.prevState = "COUNTDOWN";
     this.pendingRestart = null;
-    this.boxX = 0;
     this.explosions = [];
     this.blastBits = [];
     this.smokePuffs = [];
@@ -387,16 +366,12 @@ export class GameScene extends Phaser.Scene {
     this.blitzStrikes = [];
     this.prevContained = 0;
     this.prevLeaking = false;
-    this.finalSurge = false;
-    this.lastTickAt = 0;
     this.lastSploshAt = 0;
     this.flashUntil = -1;
     this.winDrainStart = -1;
+    this.gaugeF = 0;
     this.endButton = null;
     this.startButton = null;
-    this.tallyStart = 0;
-    this.tallyFishCounted = 0;
-    this.tallyDoneBleeped = false;
     this.dragStartY = null;
     this.dragging = false;
     this.manualScrollUntil = 0;
@@ -408,20 +383,27 @@ export class GameScene extends Phaser.Scene {
 
     this.gfxWorld = this.add.graphics();
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
-    this.reelGfx = this.add.graphics().setDepth(Z_UI);
-    this.reelMaskG = this.add.graphics().setVisible(false);
-    this.reelMask = this.reelMaskG.createGeometryMask(); // applied only while spinning
+    this.gfxTop = this.add.graphics().setDepth(Z_UI_SPRITE + 2); // above the tanker sprite
+    this.setupTankerAnim(); // the win haul-away tanker (Lottie -> offscreen canvas -> Phaser texture)
+    this.events.once("shutdown", () => {
+      this.lottieAnim?.destroy();
+      this.lottieAnim = null;
+      this.lottieContainer?.remove();
+      this.lottieContainer = null;
+      this.lottiePlaying = false;
+    });
 
     // level indicator — a top-right overlay (no black HUD box anymore)
     this.statusText = this.add
-      .text(GAME_WIDTH / 2 - 18, 8, "", {
+      .text(10, 6, "", {
         fontFamily: ARCADE_FONT,
         fontSize: "13px",
         color: COLORS.text,
-        align: "center",
-        lineSpacing: 5,
+        align: "left",
+        stroke: "#06101a",
+        strokeThickness: 4,
       })
-      .setOrigin(0.5, 0)
+      .setOrigin(0, 0)
       .setDepth(Z_TEXT);
     this.centerText = this.add
       .text(GAME_WIDTH / 2, (CONFIG.rows * CELL) / 2, "", {
@@ -457,6 +439,20 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5, 0)
       .setDepth(Z_TEXT)
       .setVisible(false);
+    this.compareText = this.add
+      .text(GAME_WIDTH / 2, 0, "", {
+        fontFamily: ARCADE_FONT,
+        fontSize: "11px",
+        color: "#cfe6ff",
+        align: "center",
+        lineSpacing: 6,
+        wordWrap: { width: 360 },
+        stroke: "#06101a",
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(Z_TEXT)
+      .setVisible(false);
     this.bannerText = this.add
       .text(GAME_WIDTH / 2, 0, "", {
         fontFamily: ARCADE_FONT,
@@ -469,6 +465,18 @@ export class GameScene extends Phaser.Scene {
       })
       .setOrigin(0.5)
       .setDepth(Z_TEXT)
+      .setVisible(false);
+    this.countdownLabel = this.add
+      .text(0, 0, "", { fontFamily: ARCADE_FONT, fontSize: "9px", color: "#cdd3da", align: "center", stroke: "#06101a", strokeThickness: 3 })
+      .setOrigin(0.5)
+      .setDepth(Z_TEXT + 5)
+      .setScrollFactor(0)
+      .setVisible(false);
+    this.countdownNum = this.add
+      .text(0, 0, "", { fontFamily: ARCADE_FONT, fontSize: "19px", color: "#ffffff", align: "center", stroke: "#06101a", strokeThickness: 4 })
+      .setOrigin(0.5)
+      .setDepth(Z_TEXT + 5)
+      .setScrollFactor(0)
       .setVisible(false);
     this.buttonText = this.add
       .text(0, 0, "", { fontFamily: ARCADE_FONT, fontSize: "14px", color: "#12100e" })
@@ -504,27 +512,6 @@ export class GameScene extends Phaser.Scene {
       if (this.audio.state === "suspended") void this.audio.resume();
     } catch {
       /* audio unavailable — silent */
-    }
-  }
-
-  /** A short synthesised bleep (no audio assets needed). */
-  private beep(freq: number, durMs: number, type: OscillatorType = "square", vol = 0.05): void {
-    const ctx = this.audio;
-    if (!ctx || ctx.state !== "running") return;
-    try {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = type;
-      osc.frequency.value = freq;
-      const now = ctx.currentTime;
-      gain.gain.setValueAtTime(vol, now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + durMs / 1000);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + durMs / 1000);
-    } catch {
-      /* ignore */
     }
   }
 
@@ -598,7 +585,6 @@ export class GameScene extends Phaser.Scene {
   private sfxFlow(pct: number): void { this.playSfx("flow", () => this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160), 0.35); }
   private sfxLeak(): void { this.playSfx("leak", () => { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); }); }
   private sfxCap(): void { this.playSfx("cap", () => this.tone(260, 130, "square", 0.05, 540)); }
-  private sfxTick(): void { this.playSfx("tick", () => this.tone(950, 32, "square", 0.04), 0.4); }
   private sfxWin(): void { this.playSfx("win", () => [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, "triangle", 0.06, f, i * 110))); }
   private sfxLose(): void { this.playSfx("lose", () => this.tone(330, 650, "sawtooth", 0.06, 80)); }
   private sfxSplosh(): void { this.playSfx("splosh", () => { this.noise(270, 0.08, 5200, 320, 2, 40); this.tone(700, 230, "sine", 0.045, 150); }); }
@@ -684,7 +670,7 @@ export class GameScene extends Phaser.Scene {
 
   private toCell(x: number, y: number): Coord | null {
     const gridY = y - HUD_H;
-    if (gridY < 0 || gridY > this.pondTop) return null;
+    if (gridY < 0 || gridY > this.gridBottom) return null; // taps in the queue band aren't grid cells
     const col = Math.floor(x / CELL);
     const row = Math.floor((gridY + this.scrollPx) / CELL);
     const coord = { row, col };
@@ -703,9 +689,13 @@ export class GameScene extends Phaser.Scene {
   private get pondTop(): number {
     return this.viewH - POND_H;
   }
-  /** Number of grid rows that fit in the play area above the pond. */
+  /** Bottom of the scrolling grid — the queue band sits between here and the pond. */
+  private get gridBottom(): number {
+    return this.pondTop - QUEUE_H;
+  }
+  /** Number of grid rows that fit in the play area above the queue band + pond. */
   private get visRows(): number {
-    return Math.max(1, Math.floor(this.pondTop / CELL));
+    return Math.max(1, Math.floor(this.gridBottom / CELL));
   }
 
   update(_time: number, deltaMs: number): void {
@@ -732,18 +722,13 @@ export class GameScene extends Phaser.Scene {
     const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
     this.model.update(revealing ? 0 : deltaMs);
 
-    // level cleared: confetti, fanfare, green flash. The pipes then DRAIN (the dump's over) for
-    // WIN_DRAIN_MS before the results card shows — the count-up starts when the card appears.
+    // level cleared: fanfare + green flash. The tanker then drives in and the pipes drain into it.
     if (this.model.state === "WON" && this.prevState !== "WON") {
-      this.spawnConfetti();
       this.sfxWin();
       this.flashUntil = this.clock + 450;
       this.flashColor = 0x9be15d;
       this.winDrainStart = this.clock;
-      this.tallyStart = this.clock + WIN_DRAIN_MS; // tally begins as the card appears
-      this.tallyFishCounted = 0;
-      this.tallyBonusBleepAt = 0;
-      this.tallyDoneBleeped = false;
+      this.queueBanner(["SPILL CONTAINED!"], 1500); // the settle beat before the tanker rolls in
     }
     if (this.model.state === "GAMEOVER" && this.prevState !== "GAMEOVER") {
       this.sfxLose();
@@ -752,30 +737,18 @@ export class GameScene extends Phaser.Scene {
     }
     this.prevState = this.model.state;
 
-    // --- juice: per-segment flow blip, leak alarm / cap, and the spill-clock finale ---
+    // --- juice: flow blip, leak alarm / cap, and the spill SURGE -> EASE phase callouts ---
     const m = this.model;
     if (m.started && m.state === "FLOWING") {
       if (m.overflowContained > this.prevContained) this.sfxFlow(m.overflowPct / 100);
       if (m.leaking && !this.prevLeaking) { this.sfxLeak(); this.cameras.main.shake(180, 0.01); }
       if (!m.leaking && this.prevLeaking) this.sfxCap();
-      const remaining = 1 - m.overflowContained / m.overflowTotal;
-      if (remaining <= 0.25 && !this.finalSurge) {
-        this.finalSurge = true; // one big warning that the end is near
-        this.queueBanner(["FINAL SURGE!"], 1500);
-        this.flashUntil = this.clock + 380;
-        this.flashColor = 0xff7a1a;
-      }
-      if (remaining > 0 && remaining <= 0.25) {
-        const interval = 90 + remaining * 4 * 220; // ticks speed up as it nears zero
-        if (this.clock - this.lastTickAt >= interval) { this.lastTickAt = this.clock; this.sfxTick(); }
-      }
     }
     this.prevContained = m.overflowContained;
     this.prevLeaking = m.leaking;
 
     this.updateCamera(deltaMs);
     this.updateDrips(deltaMs);
-    this.updateConfetti(deltaMs);
     this.updateBlast(deltaMs);
 
     // each special tile the sewage hits: clogs tumble into the pond; newest pops a toast
@@ -807,53 +780,6 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.render();
-  }
-
-  private spawnConfetti(): void {
-    const cx = GAME_WIDTH / 2;
-    const cy = this.pondTop * 0.42;
-    for (let i = 0; i < 130; i++) {
-      const spd = 220 + Math.random() * 420;
-      const ang = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.1; // mostly upward fan
-      this.confetti.push({
-        x: cx + (Math.random() - 0.5) * GAME_WIDTH * 0.4,
-        y: cy,
-        vx: Math.cos(ang) * spd,
-        vy: Math.sin(ang) * spd,
-        rot: Math.random() * Math.PI,
-        vr: (Math.random() - 0.5) * 14,
-        w: 6 + Math.random() * 8,
-        h: 11 + Math.random() * 15,
-        color: CONFETTI_COLORS[i % CONFETTI_COLORS.length],
-      });
-    }
-  }
-
-  private updateConfetti(dtMs: number): void {
-    if (!this.confetti.length) return;
-    const dt = dtMs / 1000;
-    for (const c of this.confetti) {
-      c.vy += 760 * dt; // gravity
-      c.vx *= 0.99;
-      c.x += c.vx * dt;
-      c.y += c.vy * dt;
-      c.rot += c.vr * dt;
-    }
-    this.confetti = this.confetti.filter((c) => c.y < this.viewH + 40);
-  }
-
-  private renderConfetti(g: G): void {
-    for (const c of this.confetti) {
-      const cos = Math.cos(c.rot);
-      const sin = Math.sin(c.rot);
-      const hw = c.w / 2;
-      const hh = c.h / 2;
-      const px = (dx: number, dy: number) => c.x + dx * cos - dy * sin;
-      const py = (dx: number, dy: number) => c.y + dx * sin + dy * cos;
-      g.fillStyle(c.color, 0.95);
-      g.fillTriangle(px(-hw, -hh), py(-hw, -hh), px(hw, -hh), py(hw, -hh), px(hw, hh), py(hw, hh));
-      g.fillTriangle(px(-hw, -hh), py(-hw, -hh), px(hw, hh), py(hw, hh), px(-hw, hh), py(-hw, hh));
-    }
   }
 
   /** A flowed-through unflushable tumbles out of its tile and falls into the pond. */
@@ -1028,6 +954,8 @@ export class GameScene extends Phaser.Scene {
           if (revealed) fatbergCells.push(coord);
         } else if (cell?.type === "blocker") {
           if (revealed) this.drawClogIntro(w, cx, cy, cell, coord);
+        } else if (cell?.type === "rock") {
+          if (revealed) this.drawRock(w, cx, cy, coord);
         } else if (cell) {
           this.drawCell(w, cx, cy, cell, coord);
         } else {
@@ -1055,13 +983,19 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    this.drawBuildHints();
+    const over = this.model.state === "WON" || this.model.state === "GAMEOVER";
+    if (!over) this.drawBuildHints(); // freeze the build arrows once the level's decided
 
     const ringStart = this.model.ringStart;
     const progress = this.model.fillProgress;
-    // On a win the sewage stays CONTAINED in the pipes (diverted from the river) — it doesn't
-    // drain anywhere. The flow just eases to a stop (see the flowPhase decel in update()).
-    for (const seg of this.model.filled) {
+    // On a win the contained spill drains OUT of the pipes (hauled away) — the leading edge retreats
+    // back toward the source over the settle. `drain` 0..1 is the win-settle progress.
+    const drain = this.winDrainNow();
+    const segs = this.model.filled;
+    const keep = drain > 0 ? Math.ceil(segs.length * (1 - drain)) : segs.length;
+    for (let i = 0; i < segs.length; i++) {
+      if (drain > 0 && i >= keep) continue; // this length has drained away
+      const seg = segs[i];
       if (seg.coord.row < topRow || seg.coord.row > botRow) continue;
       const cell = this.model.grid.get(seg.coord);
       if (!cell) continue;
@@ -1075,20 +1009,23 @@ export class GameScene extends Phaser.Scene {
       }
     }
 
-    this.drawLeak(w);
-    this.drawLeakArrows();
+    if (!over) {
+      this.drawLeak(w); // the spill gush + its red guide arrows freeze once the level's decided
+      this.drawLeakArrows();
+    }
     this.renderExplosions(w);
 
     const u = this.gfxUi;
     u.clear();
+    this.gfxTop.clear();
     this.renderFreeze(u); // icy tint over the grid while the flow is paused
     this.renderRain(u); // rain pour while a rain marker is active
     this.renderPond(u);
-    this.renderHud(u);
-    this.renderQueue(u); // after the HUD so the top-left box sits on top of it
+    this.renderHud();
+    this.renderQueue(u); // the bottom queue band (drawn first so the gauge sits on top of it)
+    this.renderGauge(u); // the spill gauge — a semicircle on the right of the band
     this.renderDrips(u); // falling spilled sewage, on top of everything
     this.renderJunkDrops();
-    this.renderConfetti(u);
     this.renderToast(u);
     this.renderBlitz(u); // lightning strikes zapping blitzed tiles in
     this.renderScorePops(); // rising "+N BONUS" stars
@@ -1167,7 +1104,14 @@ export class GameScene extends Phaser.Scene {
     }
     this.drawPipe(g, cx, cy, cell.openings, COLORS.pipe, 0.3, this.pipeGrow(coord));
     if (cell.power) {
-      this.drawPowerBadge(g, cx + CELL * 0.28, cy - CELL * 0.28, cell.power, 13, Z_GRID_SPRITE + 1);
+      // armed-and-waiting: a power sits under this laid pipe (it clears once the flow fires it), so
+      // flash/pulse it to tell the player a power is loaded and the flow's about to hit it.
+      const bx = cx + CELL * 0.28;
+      const by = cy - CELL * 0.28;
+      const flash = 0.5 + 0.5 * Math.sin(this.clock / 130 + cx * 0.05);
+      g.fillStyle(POWER_TINT[cell.power], 0.12 + 0.32 * flash); // pulsing glow ring
+      g.fillCircle(bx, by, 11 + 9 * flash);
+      this.drawPowerBadge(g, bx, by, cell.power, 13 + 2.5 * flash, Z_GRID_SPRITE + 1, 0.65 + 0.35 * flash);
     }
     const fuse = this.model.fuseAt(coord); // any piece can carry a lit fuse
     if (fuse !== undefined) this.drawDynamite(g, cx, cy, fuse);
@@ -1201,6 +1145,29 @@ export class GameScene extends Phaser.Scene {
 
   /** A clog revealing itself: the unflushable spins through the junk types like a fruit-machine
    *  reel (smooth vertical slide, decelerating) before settling on the one it'll actually be. */
+  /** A faceted boulder — impassable, blow-up-able. Pops in on the board reveal. */
+  private drawRock(g: G, cx: number, cy: number, coord: Coord): void {
+    const ci = this.cellIntro(coord);
+    if (ci <= 0) return; // not yet revealed
+    const sc = easeOutBack(Math.min(1, ci));
+    g.fillStyle(0x000000, 0.22);
+    g.fillEllipse(cx, cy + CELL * 0.34, CELL * 0.5 * sc, CELL * 0.14 * sc); // ground shadow
+    if (this.useSprite("rock", cx, cy - CELL * 0.04, CELL * 0.96 * sc, Z_GRID_SPRITE)) return;
+    // fallback: a procedural grey boulder if the svg didn't load
+    const r = CELL * 0.4 * sc;
+    g.fillStyle(0x6b7078, 1);
+    g.fillCircle(cx, cy, r); // boulder body
+    g.fillStyle(0x565b62, 1);
+    g.fillCircle(cx + r * 0.24, cy + r * 0.2, r * 0.68); // shaded lower-right
+    g.fillStyle(0x888e97, 1);
+    g.fillCircle(cx - r * 0.3, cy - r * 0.28, r * 0.4); // highlight upper-left
+    g.lineStyle(2, 0x3c4046, 0.7); // facet cracks
+    g.lineBetween(cx - r * 0.12, cy - r * 0.5, cx + r * 0.05, cy + r * 0.12);
+    g.lineBetween(cx + r * 0.05, cy + r * 0.12, cx + r * 0.5, cy + r * 0.22);
+    g.lineStyle(2.5, 0x2b2e33, 0.85);
+    g.strokeCircle(cx, cy, r); // dark outline
+  }
+
   private drawClogIntro(g: G, cx: number, cy: number, cell: Cell, coord: Coord): void {
     const ci = this.cellIntro(coord);
     if (ci <= 0) return; // not yet revealed
@@ -1888,65 +1855,54 @@ export class GameScene extends Phaser.Scene {
     g.fillTriangle(x + r, y, x, y - w, x, y + w);
   }
 
-  /** The "next pipe" item box — static, top-left (no bobbing). */
+  /** The dedicated horizontal QUEUE BAND between the grid and the river: the current piece (left,
+   *  with its roulette) then the upcoming pieces in a row — reserved space, never over the build. */
   private renderQueue(g: G): void {
     const m = this.model;
-    this.reelGfx.clear(); // masked reel layer — redrawn only while spinning
-    this.reelGfx.clearMask(); // default: no mask (no per-frame stencil cost when idle)
-    if (m.state === "WON" || m.state === "GAMEOVER") return; // hide once the level's over
-    if (!m.started) return; // no next-piece box until the run begins
+    const bandTop = this.gridBottom;
+    const cy = bandTop + QUEUE_H / 2;
+    // the band itself — a metal strip dividing the grid from the river
+    g.fillStyle(0x14161b, 1);
+    g.fillRect(0, bandTop, GAME_WIDTH, QUEUE_H);
+    g.fillStyle(0x3a3f47, 1);
+    g.fillRect(0, bandTop, GAME_WIDTH, 3); // top rail
+    g.fillStyle(0x07080a, 1);
+    g.fillRect(0, bandTop + QUEUE_H - 2, GAME_WIDTH, 2); // bottom shadow
 
+    if (m.state === "WON" || m.state === "GAMEOVER" || !m.started) return;
     const front = m.currentPiece;
     if (front !== this.prevFront) {
+      this.slideOff = this.prevFront; // remember the piece leaving so it slides off the left
       this.prevFront = front;
-      this.rouletteStart = this.clock; // new pipe -> spin the reel
+      this.rouletteStart = this.clock; // slide start
     }
     if (!front) return;
-    const age = this.clock - this.rouletteStart;
-    const spinning = age < ROULETTE_MS;
 
-    const box = 92;
-    let cy = box / 2 + 10; // fixed at the top
-    if (this.intro < 1) cy -= (1 - easeOutBack(this.intro)) * (box + 70); // slides down into view
-    // sits top-left, but slides to the right when you're building behind it
-    const left = box / 2 + 10;
-    const right = GAME_WIDTH - box / 2 - 10;
-    const fx = m.buildCol * CELL + CELL / 2;
-    const fy = this.rowScreenY(m.buildRow) + CELL / 2;
-    const behind = fx < box + 28 && fy < box + 28;
-    const targetX = behind ? right : left;
-    if (this.boxX === 0) this.boxX = targetX; // snap on first frame
-    this.boxX += (targetX - this.boxX) * 0.12; // glide aside
-    const cx = this.boxX;
+    const tile = 38;
+    const step = tile + 6; // packed tightly together, not spread across the width
+    const gaugeLeft = GAME_WIDTH - 80; // the gauge sits on the right, clear of the queue
+    const n = m.queue.length;
+    const firstX = 14 + tile / 2; // leftmost slot (furthest-future piece)
+    const lastX = firstX + (n - 1) * step; // the CURRENT piece's slot (right end of the packed group)
+    const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
+    const ee = 1 - Math.pow(1 - e, 3); // ease-out
 
-    // rainbow only while the reel spins; a steady gold frame at rest
-    const hue = spinning ? this.clock / 90 : 0.13;
-    this.drawItemBox(g, cx, cy, box, hue);
+    // the active slot highlight (fixed on the RIGHT); pieces slide rightward into it as you place
+    this.drawItemBox(g, lastX, cy, tile + 8, 0.13);
 
-    const glyph = box * 0.72;
-    if (spinning) {
-      // a fruit-machine reel: full-size symbols slide UP a full slot at a time,
-      // CLIPPED at the window rim (via the mask), decelerating onto the target.
-      const inner = box - 12;
-      this.reelMaskG.clear();
-      this.reelMaskG.fillStyle(0xffffff, 1);
-      this.reelMaskG.fillRoundedRect(cx - inner / 2, cy - inner / 2, inner, inner, 10);
-      this.reelGfx.setMask(this.reelMask); // clip the sliding symbols, only while spinning
+    const drawTile = (px: number, qp: QueuePiece) => {
+      if (px < 4 || px > gaugeLeft - 4) return; // off the band / behind the gauge
+      this.drawPipeGlyph(g, px, cy, PIECE_OPENINGS[qp.type], tile * 0.78);
+      if (qp.dynamite) this.drawDynamiteBadge(g, px, cy, tile * 0.78);
+    };
 
-      const sh = box; // one symbol per slot — clean slivers at the edges
-      const eased = 1 - Math.pow(1 - age / ROULETTE_MS, 3); // ease-out = momentum
-      const s = ROULETTE_REEL * (1 - eased); // scroll position, slows to 0 (the target)
-      for (let i = Math.floor(s) - 1; i <= Math.floor(s) + 1; i++) {
-        if (i < 0) continue;
-        const dy = (s - i) * sh; // i==s -> centred; the target (i=0) rises from below
-        const type = i === 0 ? front.type : ROULETTE_PIECES[(i * 5) % ROULETTE_PIECES.length];
-        this.drawPipeGlyph(this.reelGfx, cx, cy + dy, PIECE_OPENINGS[type], glyph);
-      }
-    } else {
-      // the reel already left the piece centred at full size — just rest there
-      this.drawPipeGlyph(g, cx, cy, PIECE_OPENINGS[front.type], glyph);
-      if (front.dynamite) this.drawDynamiteBadge(g, cx, cy, glyph);
+    // current (queue[0]) sits at slot n-1 (right); upcoming fill leftward (next nearest the current)
+    for (let i = 0; i < n; i++) {
+      const qp = m.queue[i];
+      if (!qp) break;
+      drawTile(firstX + (n - 2 - i + ee) * step, qp);
     }
+    if (this.slideOff && ee < 1) drawTile(firstX + (n - 1 + ee) * step, this.slideOff); // sliding off right
   }
 
   /** A dynamite stick + spark overlaid on the next-piece box so a bomb reads as a bomb. */
@@ -2383,47 +2339,125 @@ export class GameScene extends Phaser.Scene {
 
   // ---- HUD -------------------------------------------------------------------
 
-  /** A C4-style segmented countdown clock (top-right): the red "spill remaining" pie depletes
-   *  clockwise as you contain the overflow; empties to green when the whole spill is contained. */
-  private renderSpillClock(g: G): void {
-    const m = this.model;
-    const remaining = Math.max(0, 1 - m.overflowContained / m.overflowTotal); // 1 -> 0
-    const urgent = remaining > 0 && remaining <= 0.25;
-    // in the final stretch the clock swells and throbs so the ending is unmissable
-    const R = 22 * (urgent ? 1.25 + 0.12 * Math.sin(this.clock / 90) : 1);
-    const ccx = GAME_WIDTH - 22 - 14;
-    const ccy = 22 + 12;
-
-    g.fillStyle(0x06101a, 0.85);
-    g.fillCircle(ccx, ccy, R + 3); // dark face
-    if (remaining > 0.001) {
-      const start = -Math.PI / 2; // 12 o'clock
-      const end = start + remaining * Math.PI * 2;
-      const a = urgent ? 0.7 + 0.3 * Math.sin(this.clock / 80) : 0.92;
-      g.fillStyle(0xff5c5c, a); // red = spill still to contain
-      g.slice(ccx, ccy, R, start, end, false);
-      g.fillPath();
-    } else {
-      g.fillStyle(0x9be15d, 0.95); // fully contained
-      g.fillCircle(ccx, ccy, R);
+  /** Load the Lottie tanker into an offscreen canvas and expose it as a Phaser texture so it can
+   *  be drawn in-canvas (transparent, vector-crisp) and refreshed each frame during the win.
+   *  Lottie creates + sizes its own canvas inside a hidden container (so the 1000² art is fitted
+   *  to it via preserveAspectRatio — passing a raw context does NOT scale it). */
+  private setupTankerAnim(): void {
+    this.lottieAnim?.destroy();
+    this.lottieContainer?.remove();
+    const container = document.createElement("div");
+    container.style.cssText = "position:absolute;left:-9999px;top:0;width:512px;height:512px;pointer-events:none;";
+    document.body.appendChild(container);
+    this.lottieContainer = container;
+    this.lottieAnim = lottie.loadAnimation<"canvas">({
+      container,
+      renderer: "canvas",
+      loop: true,
+      autoplay: false,
+      animationData: tankerLottie as unknown as object,
+      rendererSettings: { clearCanvas: true, preserveAspectRatio: "xMidYMid meet" },
+    });
+    this.lottiePlaying = false;
+    const lc = container.querySelector("canvas");
+    if (lc) {
+      if (this.textures.exists("tanker")) this.textures.remove("tanker");
+      this.textures.addCanvas("tanker", lc);
     }
-    g.lineStyle(2.5, 0xaeb6c0, 0.95);
-    g.strokeCircle(ccx, ccy, R + 3); // metal bezel
-    g.lineStyle(2, 0x06101a, 0.7); // 12 tick segments
-    for (let k = 0; k < 12; k++) {
-      const a = (k / 12) * Math.PI * 2;
-      g.lineBetween(ccx + Math.cos(a) * (R - 6), ccy + Math.sin(a) * (R - 6), ccx + Math.cos(a) * R, ccy + Math.sin(a) * R);
-    }
-    g.fillStyle(0xe8edf2, 1);
-    g.fillCircle(ccx, ccy, 2.5); // hub
-    this.useLabel("SPILL", ccx, ccy + R + 9, Z_TEXT, 9, { color: "#ffd24a" });
   }
 
-  private renderHud(g: G): void {
+  /** Win-settle progress 0..1 over WIN_DRAIN_MS — drives the pipes draining as the spill is hauled
+   *  away. 0 when not winning; reaches (and stays) 1 once the settle completes. */
+  private winDrainNow(): number {
+    if (this.model.state !== "WON" || this.winDrainStart < 0) return 0;
+    return Math.min(1, (this.clock - this.winDrainStart) / WIN_DRAIN_MS);
+  }
+
+  /** Bookend countdowns: "SPILL STARTING 3..2..1" before the flow, and "SPILL STOPPING 5..1" over
+   *  the last few segments — so both the start and the end are clearly telegraphed. */
+  /** A diegetic sewer pressure gauge (top-right): the needle climbs SAFE→SPILL over the pre-flow
+   *  3·2·1, then sweeps SPILL→SAFE as you contain the dump. Centre readout = seconds, then segments
+   *  left. Both phases of "the spill clock" in one widget. */
+  private renderGauge(g: G): void {
     const m = this.model;
-    // centre tally: the fish grade + banked score (points are tallied on the clear screen)
-    this.statusText.setText(`FISH ${m.fishAlive}/${m.fishCount}\nSCORE ${m.runScore}`);
-    if (m.started) this.renderSpillClock(g); // top-right C4-style spill countdown
+    const R = 34;
+    const gx = GAME_WIDTH - R - 12; // pivot: right side of the queue band
+    const gy = this.pondTop - 14; // roughly centred in the band, arc reaching up
+
+    // target needle fraction (0 = SAFE/left, 1 = SPILL/right) + the centre number
+    let target = 0;
+    let num = "";
+    if (!m.started || m.state === "WON") {
+      target = 0;
+    } else if (m.state === "GAMEOVER") {
+      target = 1;
+    } else if (m.state === "COUNTDOWN") {
+      target = 1 - m.countdownRemaining / CONFIG.countdownMs; // danger building toward SPILL
+      const n = Math.ceil(m.countdownRemaining / 1000);
+      if (n >= 1) num = `${n}`;
+    } else {
+      // FLOWING: needle releases toward SAFE as it's contained; number ONLY for the final countdown
+      target = 1 - Math.min(1, m.overflowContained / m.overflowTotal);
+      const remaining = m.overflowTotal - m.overflowContained;
+      if (remaining >= 1 && remaining <= 5) num = `${remaining}`;
+    }
+    this.gaugeF += (target - this.gaugeF) * 0.18; // smooth the per-segment steps
+
+    // --- semicircle face (flat side down): metal rim + dark half-disk ---
+    const halfDisk = (rad: number, col: number) => {
+      g.fillStyle(col, 1);
+      g.beginPath();
+      g.moveTo(gx, gy);
+      g.arc(gx, gy, rad, Math.PI, Math.PI * 2, false);
+      g.closePath();
+      g.fillPath();
+    };
+    halfDisk(R + 4, 0x23262b);
+    halfDisk(R + 2, 0x53585f);
+    halfDisk(R, 0x121317);
+
+    // --- colour zones along the arc (PI .. 2PI), SAFE green left -> SPILL red right ---
+    const A0 = Math.PI;
+    const span = Math.PI;
+    const zone = (t0: number, t1: number, col: number) => {
+      g.lineStyle(6, col, 0.92);
+      g.beginPath();
+      g.arc(gx, gy, R - 8, A0 + span * t0, A0 + span * t1, false);
+      g.strokePath();
+    };
+    zone(0, 0.4, 0x4ade80); // SAFE
+    zone(0.4, 0.62, 0xf6c453); // warning
+    zone(0.62, 1, 0xff5c5c); // SPILL
+
+    // --- ticks ---
+    g.lineStyle(1.5, 0x9aa0a8, 0.7);
+    for (let i = 0; i <= 8; i++) {
+      const a = A0 + span * (i / 8);
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      g.lineBetween(gx + (R - 2) * c, gy + (R - 2) * s, gx + (R - 12) * c, gy + (R - 12) * s);
+    }
+
+    // --- needle ---
+    const wob = m.state === "FLOWING" ? Math.sin(this.clock / 90) * 0.015 : 0;
+    const a = A0 + span * Math.max(0, Math.min(1, this.gaugeF)) + wob;
+    g.lineStyle(3, 0xfff2cc, 0.95);
+    g.lineBetween(gx, gy, gx + (R - 10) * Math.cos(a), gy + (R - 10) * Math.sin(a));
+    g.fillStyle(0xff5c5c, 1); g.fillCircle(gx, gy, 5); // hub
+    g.fillStyle(0x121317, 1); g.fillCircle(gx, gy, 2.5);
+
+    // --- centre number (inside the arc, above the pivot) ---
+    this.countdownLabel.setVisible(false);
+    if (num) {
+      this.countdownNum.setText(num).setFontSize(15).setPosition(gx, gy - R * 0.46).setVisible(true);
+    } else {
+      this.countdownNum.setVisible(false);
+    }
+  }
+
+  private renderHud(): void {
+    const m = this.model;
+    this.statusText.setText(`SCORE ${m.runScore}`);
     this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
@@ -2438,24 +2472,30 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Modal end-of-level card with the fish tally and a single button to continue. */
+  /** Modal end-of-level card framed as a real spill report — the player's single spill (duration,
+   *  litres discharged, fish lost) set against the real 2024 scale. The awareness IS the payoff. */
   private renderEndDialog(g: G): void {
     const m = this.model;
-    // hold the card back while the pipes drain on a win (the count-up starts as it appears)
+    // hold the card back while the pipes drain on a win, then show the report
     const draining = m.state === "WON" && this.clock - this.winDrainStart < WIN_DRAIN_MS;
     if ((m.state !== "WON" && m.state !== "GAMEOVER") || draining) {
       this.endButton = null;
       this.buttonText.setVisible(false);
+      this.compareText.setVisible(false);
+      if (this.lottiePlaying) {
+        this.lottieAnim?.pause();
+        this.lottiePlaying = false;
+      }
       return;
     }
     const won = m.state === "WON";
     const accent = won ? COLORS.protest : COLORS.dividend;
 
-    g.fillStyle(0x05070c, 0.62); // dim the whole screen so it reads as modal
+    g.fillStyle(0x05070c, 0.66); // dim the whole screen so it reads as modal
     g.fillRect(0, 0, GAME_WIDTH, this.viewH);
 
-    const pw = 400;
-    const ph = 330;
+    const pw = 420;
+    const ph = Math.min(this.viewH - 24, 466);
     const px = GAME_WIDTH / 2 - pw / 2;
     const py = this.viewH / 2 - ph / 2;
     g.fillStyle(0x12100e, 0.97);
@@ -2463,19 +2503,41 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(3, accent, 0.95);
     g.strokeRoundedRect(px, py, pw, ph, 18);
 
-    const title = won ? "RIVER SAVED!" : "RIVER POLLUTED";
-    let body: string;
-    if (won) {
-      body = this.tallyText(m);
-    } else {
-      body = `\n${m.fishCount} FISH LOST\n\nSCORE  ${m.runScore}`;
+    // on a win: the tanker (the contained spill, hauled off) sits above the title
+    if (won && this.textures.exists("tanker")) {
+      if (!this.lottiePlaying) {
+        this.lottieAnim?.goToAndPlay(0, true);
+        this.lottiePlaying = true;
+      }
+      (this.textures.get("tanker") as Phaser.Textures.CanvasTexture).refresh();
+      this.useSprite("tanker", GAME_WIDTH / 2, py + 52, 96, Z_TEXT + 1);
+    } else if (this.lottiePlaying) {
+      this.lottieAnim?.pause();
+      this.lottiePlaying = false;
     }
-    this.centerText.setPosition(GAME_WIDTH / 2, py + 96).setText(`${title}\n${body}`);
+
+    // this level reframed as one real spill event
+    const hours = Math.max(1, Math.round(m.overflowTotal * 0.4));
+    const litres = (hours * 140000).toLocaleString();
+    const title = won ? "SPILL ENDED" : "RIVER OVERWHELMED";
+    const report =
+      `${title}\n\n` +
+      `DURATION    ${hours} HOURS\n` +
+      `DISCHARGED    ${litres} L\n` +
+      `FISH LOST    ${m.fishDead}\n\n` +
+      `SCORE    ${m.runScore}`;
+    this.centerText.setPosition(GAME_WIDTH / 2, py + 190).setText(report);
+
+    // the gut-punch: this was ONE spill vs the real annual scale
+    this.compareText
+      .setPosition(GAME_WIDTH / 2, py + 300)
+      .setText(COMPARISONS[(m.level - 1) % COMPARISONS.length])
+      .setVisible(true);
 
     const bw = 240;
-    const bh = 58;
+    const bh = 54;
     const bx = GAME_WIDTH / 2 - bw / 2;
-    const by = py + ph - bh - 28;
+    const by = py + ph - bh - 20;
     g.fillStyle(accent, 0.95);
     g.fillRoundedRect(bx, by, bw, bh, 12);
     this.endButton = { x: bx, y: by, w: bw, h: bh };
@@ -2508,8 +2570,8 @@ export class GameScene extends Phaser.Scene {
 
     const intro =
       m.level === 1
-        ? "SPILLZ\n\nWater firms dump sewage\nin the river!\n\nContain the spill\n& save the fish."
-        : `LEVEL ${m.level}\n\nContain the spill —\nsave the fish!`;
+        ? "SPILLZ\n\nWater firms pump sewage\ninto our rivers.\n\nYou can't stop them —\nonly limit the damage."
+        : `LEVEL ${m.level}\n\nLimit the damage.\nSave what fish you can.`;
     this.centerText.setPosition(GAME_WIDTH / 2, py + 86).setText(intro);
 
     // a real UK water-pollution fact, one per level (cycles through the data set)
@@ -2529,37 +2591,4 @@ export class GameScene extends Phaser.Scene {
     this.buttonText.setPosition(GAME_WIDTH / 2, by + bh / 2).setText("START").setVisible(true);
   }
 
-  /** SNES-style results: fish bip up one at a time, then the purity bonus rolls up
-   *  fast with a high beep, all adding into the running SCORE. */
-  private tallyText(m: Game): string {
-    const t = this.clock - this.tallyStart;
-    const fish = m.fishAlive;
-    const purity = m.levelPurityBonus;
-    const base = m.runScore - m.levelFishBonus - purity; // total before this level's tally
-
-    const FISH_STEP = 320;
-    const fishShown = Math.min(fish, Math.max(0, Math.floor(t / FISH_STEP)));
-    const bonusStart = fish * FISH_STEP + 400;
-    const bonusDur = 1100;
-    const purityShown =
-      t < bonusStart ? 0 : Math.min(purity, Math.round((purity * (t - bonusStart)) / bonusDur));
-    const done = t > bonusStart + bonusDur + 150;
-
-    // sounds
-    if (fishShown > this.tallyFishCounted) {
-      this.tallyFishCounted = fishShown;
-      this.beep(680 + fishShown * 70, 90, "square"); // a rising bip per fish
-    }
-    if (t >= bonusStart && purityShown < purity && this.clock - this.tallyBonusBleepAt > 45) {
-      this.tallyBonusBleepAt = this.clock;
-      this.beep(1320, 35, "square", 0.035); // rapid high beep while the bonus rolls
-    }
-    if (done && !this.tallyDoneBleeped) {
-      this.tallyDoneBleeped = true;
-      this.beep(1245, 200, "triangle", 0.06); // ding!
-    }
-
-    const scoreShown = base + fishShown * CONFIG.fishPoints + purityShown;
-    return `\nFISH  x ${fishShown}\nPURITY BONUS  ${purityShown}\n\nSCORE  ${scoreShown}`;
-  }
 }

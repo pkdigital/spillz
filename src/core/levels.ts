@@ -37,6 +37,15 @@ export function obstacleChance(row: number): number {
 /** Per-cell chance a power-up tile is seeded on a grid row (also board features). */
 export const POWER_CELL_CHANCE = 0.05;
 
+/** First level rocks (impassable, blow-up-able boulders) can appear. */
+export const ROCK_START_ROW = 5;
+/** Per-cell chance an impassable rock is seeded (off the source column). Rare + strategic; you
+ *  route around it or spend dynamite to clear the cell. Climbs a touch with depth. */
+export function rockChance(level: number, row: number): number {
+  if (level < 2 || row < ROCK_START_ROW) return 0;
+  return Math.min(0.02 + (level - 2) * 0.006, 0.055);
+}
+
 /**
  * Bonus four-way cross tiles per chunk. None in the early levels (it's a powerful,
  * confusing piece for new players); it shows up from level 3 on.
@@ -64,7 +73,17 @@ export function directnessForLevel(level: number): number {
   // dialled back: the queue no longer spoon-feeds a near-straight route — it weaves more, so the
   // forced pieces demand real placement decisions. Still descends (forward-only); loosens further
   // with depth. (The flow accelerates, so awkward pieces under time pressure is the puzzle.)
-  return Math.max(0.22, 0.42 - (level - 1) * 0.05);
+  return Math.max(0.35, 0.55 - (level - 1) * 0.05);
+}
+
+/**
+ * Random NON-connecting decoy pieces spliced into each queue chunk — shapes that (mostly) don't
+ * continue the path, so the player has to dump them off-route or overwrite them. This is the main
+ * "stop the queue being too forgiving" dial. None land in the first couple of slots (spliceIn keeps
+ * the opening fair — i.e. not "at the edge"); the count climbs with depth.
+ */
+export function decoysForLevel(level: number): number {
+  return Math.min(2 + Math.floor((level - 1) * 0.7), 8); // L1:2, L3:3, L5:4, … capped
 }
 
 /** How many fish live in this level's pond — the run score is the total saved. */

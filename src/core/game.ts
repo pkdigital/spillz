@@ -9,11 +9,13 @@ import {
   OPENING_PATH_LEN,
   POWER_CELL_CHANCE,
   crossesForLevel,
+  decoysForLevel,
   directnessForLevel,
   fishForLevel,
   fishSpeciesForLevel,
   obstacleChance,
   overflowFor,
+  rockChance,
   teesForLevel,
 } from "./levels";
 import type { Coord, FlowEvent, GameState, PieceType, PowerType, QueuePiece } from "./types";
@@ -33,8 +35,8 @@ export const CONFIG = {
   rows: 10, // visible viewport rows (the world is infinite downward via scroll)
   cols: 7,
   queueLength: 5,
-  /** Lead time before the spill starts oozing (a quick beat after the board reveals). */
-  countdownMs: 1000,
+  /** Lead time before the spill starts oozing — long enough for a "SPILL STARTING 3..2..1" beat. */
+  countdownMs: 3000,
   /**
    * Milliseconds per pipe segment filled at level 1. THIS is the base flow rate.
    * Higher = slower. Level 1 is a deliberate trickle (forgiving so you can keep ahead
@@ -44,19 +46,19 @@ export const CONFIG = {
   /** The spill ACCELERATES as it's contained: it starts a trickle (set-up time) and ramps to a
    *  frantic chase by the time the dump's nearly diverted. `flowIntervalMs` is the opening (slow)
    *  ms/segment; `flowFastMs` is the rate at 100% contained. The whole ramp shifts faster per level. */
-  flowIntervalMs: 1900,
-  flowFastMs: 520,
-  flowSpeedupPerLevel: 110,
-  minFlowIntervalMs: 400,
-  maxFlowIntervalMs: 2400,
+  flowIntervalMs: 2100,
+  flowFastMs: 850,
+  flowSpeedupPerLevel: 70,
+  minFlowIntervalMs: 620,
+  maxFlowIntervalMs: 2600,
   sourceCol: 3,
 
   // --- pond / tug-of-war: Water Quality vs £ Profit (balance 0..1 = quality) ---
-  startBalance: 0.6,
+  startBalance: 0.72,
   /** Quality lost each tick while sewage is leaking from an open end. */
-  spillDrainPerTick: 0.05,
+  spillDrainPerTick: 0.035,
   /** Quality regained per safely-contained segment (keeps the meter winnable). */
-  healPerSegment: 0.006,
+  healPerSegment: 0.008,
   /** A shareholder-dividend tile shifts the meter toward profit. */
   dividendHit: 0.12,
   /** A protest/judge tile shifts it back toward quality. */
@@ -85,6 +87,7 @@ export const CONFIG = {
   // --- score: tallied additively on the level-clear screen (SNES style) ---
   fishPoints: 500, // points per fish rescued
   purityBonusMax: 8000, // bonus for a perfectly pristine pond (scales with final quality)
+  pointsPerSegment: 25, // points banked each time the sewage flows into another contained pipe tile
 
   // --- bucket-1 powers ---
   scorePower: 1000, // bonus points a score marker grants (× its 2/3/4 magnitude)
@@ -155,6 +158,8 @@ export class Game {
   /** Top-left of the current fatberg (for handing out dynamite at the right time). */
   private fatbergAnchor: Coord | null = null;
   private dynamiteGiven = false;
+  /** Every rock seeded this level (impassable; destructible with dynamite). */
+  private rocks: Coord[] = [];
   /** Earliest elapsed-ms the game may slip the player a lifeline piece again. */
   private helpAt = 0;
   /** Membership set mirroring `filled`, for fast flood lookups. */
@@ -389,6 +394,8 @@ export class Game {
         pathLen,
         crosses: crossesForLevel(this.level),
         tees: teesForLevel(this.level),
+        // duds to dump/overwrite (never in the first slots — spliceIn keeps the start fair, "the edge")
+        decoys: decoysForLevel(this.level),
         rng: this.rng,
         // bias the planned path to keep DESCENDING (no fixed destination — it's an overflow you
         // divert ever downward); the synthetic point below just pulls the walk down the column.
@@ -408,13 +415,19 @@ export class Game {
       this.obstacleRow++;
       const r = this.obstacleRow;
       const clog = obstacleChance(r);
+      const rock = rockChance(this.level, r);
       for (let col = 0; col < CONFIG.cols; col++) {
         const c = { row: r, col };
         if (!this.grid.isEmpty(c)) continue;
         const roll = this.rng();
-        if (roll < clog) {
+        if (col !== CONFIG.sourceCol && roll < rock) {
+          // a boulder: impassable AND can't be built through — route around it or blow it up.
+          // never on the source column, so a straight descent always exists.
+          this.grid.set(c, "rock");
+          this.rocks.push(c);
+        } else if (roll < rock + clog) {
           this.grid.set(c, "blocker", { junk: randomJunk(this.rng) });
-        } else if (roll < clog + POWER_CELL_CHANCE) {
+        } else if (roll < rock + clog + POWER_CELL_CHANCE) {
           // power-up marker on the GROUND: build a pipe through it (good) or route
           // around it (bad). Cell stays empty/buildable until then.
           // a faucet of strength 2x / 3x / 4x — the label warns how much it speeds up
@@ -501,11 +514,21 @@ export class Game {
     return true;
   }
 
-  /** Hand the player a stick of dynamite (into the queue) once they build near
-   *  the fatberg — so it arrives when it's useful, not at the start of the run. */
+  /** Rows of every un-cleared destructible obstacle (the fatberg boss + rocks). */
+  private destructibleRows(): number[] {
+    const rows: number[] = [];
+    if (this.fatbergAnchor && this.fatbergStillStanding()) rows.push(this.fatbergAnchor.row);
+    for (const rk of this.rocks) if (this.grid.get(rk)?.type === "rock") rows.push(rk.row);
+    return rows;
+  }
+
+  /** Hand the player a stick of dynamite (into the queue) once they build near a destructible
+   *  obstacle (the fatberg OR a rock) — so it arrives when it's useful, not at the start. */
   private maybeGiveDynamite(): void {
-    if (this.dynamiteGiven || !this.fatbergAnchor) return;
-    if (this.maxPlacedRow < this.fatbergAnchor.row - 4) return;
+    if (this.dynamiteGiven) return;
+    const rows = this.destructibleRows();
+    if (rows.length === 0) return;
+    if (!rows.some((row) => this.maxPlacedRow >= row - 4)) return; // not near one yet
     // strap a fuse onto the upcoming piece — whatever shape it is — so the shape
     // is never dictated by the dynamite.
     const piece = this.queue[1] ?? this.queue[0];
@@ -521,6 +544,7 @@ export class Game {
     const existing = this.grid.get(c);
     if (existing?.type === "source") return false; // the manhole is a fixture
     if (existing?.type === "fatberg") return false; // can't build through the boss — blow it up
+    if (existing?.type === "rock") return false; // impassable boulder — blow it up to clear the cell
     // clogs CAN be built through (at a cost — see placePiece), so they're not blocked here
     if (this.isFilled(c)) {
       // Filled tiles are locked — EXCEPT the one currently bursting, which you may
@@ -728,13 +752,14 @@ export class Game {
     }
   }
 
-  /** Clear every fatberg tile within blast radius, at a quality cost. */
+  /** Clear every destructible obstacle (fatberg tile or rock) within blast radius, at a cost. */
   private detonate(c: Coord): void {
     let cleared = 0;
     for (let dr = -2; dr <= 2; dr++) {
       for (let dc = -2; dc <= 2; dc++) {
         const t = { row: c.row + dr, col: c.col + dc };
-        if (this.grid.get(t)?.type === "fatberg") {
+        const type = this.grid.get(t)?.type;
+        if (type === "fatberg" || type === "rock") {
           this.grid.clear(t);
           cleared++;
         }
@@ -745,8 +770,8 @@ export class Game {
       this.adjustBalance(-CONFIG.explosionHit);
       this.profitPounds += CONFIG.explosionPounds;
     }
-    // wasted the dynamite (the berg still stands)? re-arm the supply so it can still be cleared
-    if (this.fatbergPlaced && this.fatbergStillStanding()) {
+    // anything destructible still standing (this berg, or rocks elsewhere)? re-arm the supply
+    if (this.destructibleRows().length > 0) {
       this.dynamiteGiven = false;
     }
   }
@@ -764,9 +789,13 @@ export class Game {
   }
 
   private effectiveFlowMs(): number {
-    // accelerate with how much of the dump is already contained: trickle -> frantic
+    // a SURGE: the spill starts a trickle, ramps to a frantic peak through the middle, then
+    // peters out near the end as the dump subsides (intensity 0 at both ends, 1 in the middle).
     const frac = Math.min(1, this.overflowContained / this.overflowTotal);
-    const ramp = CONFIG.flowIntervalMs + (CONFIG.flowFastMs - CONFIG.flowIntervalMs) * frac;
+    const up = Math.min(1, frac / 0.3); // builds over the first 30%
+    const down = Math.max(0, Math.min(1, (1 - frac) / 0.25)); // eases over the last 25%
+    const intensity = Math.min(up, down);
+    const ramp = CONFIG.flowIntervalMs + (CONFIG.flowFastMs - CONFIG.flowIntervalMs) * intensity;
     const base = ramp - (this.level - 1) * CONFIG.flowSpeedupPerLevel;
     return Math.max(CONFIG.minFlowIntervalMs, Math.min(CONFIG.maxFlowIntervalMs, base + this.flowMod));
   }
@@ -787,6 +816,7 @@ export class Game {
     for (const nf of newlyFilled) {
       this.fillCell(nf.coord, nf.entry, this.ringStart);
       this.adjustBalance(CONFIG.healPerSegment); // containment slowly recovers quality
+      this.runScore += CONFIG.pointsPerSegment; // score ticks up as the flow fills each pipe tile
       if (this.state !== "FLOWING") return;
     }
 

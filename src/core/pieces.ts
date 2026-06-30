@@ -24,6 +24,7 @@ export const PIECE_OPENINGS: Record<PieceType, number> = {
   // (lower levels are forgiving — accepts the sewage from all four sides)
   blocker: 0, // solid clog (unflushable) — sewage can't pass
   fatberg: 0, // giant clog boss — solid, occupies a 2x2 block
+  rock: 0, // solid boulder — impassable; clear it with dynamite
 };
 
 /** The four T-junction orientations. */

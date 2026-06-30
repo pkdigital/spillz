@@ -29,7 +29,8 @@ export type PieceType =
   | "source"
   | "terminal"
   | "blocker"
-  | "fatberg"; // a giant multi-tile clog boss; can't build through, must blow it up
+  | "fatberg" // a giant multi-tile clog boss; can't build through, must blow it up
+  | "rock"; // a single-cell boulder; can't build through OR pass — blow it up to clear the cell
 
 /** Power effects that fire once when sewage flows through the tile. */
 export type PowerType =

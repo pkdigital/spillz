@@ -1,4 +1,4 @@
-import { opposite, randomTee, step } from "./pieces";
+import { opposite, randomPiece, randomTee, step } from "./pieces";
 import { Side, type Coord, type PieceType, type QueuePiece } from "./types";
 
 // Queue generation. The forced queue is NOT pure random: we generate a
@@ -149,6 +149,8 @@ export interface ChunkOpts {
   target?: Coord;
   /** 0..1 — how strongly the path aims at `target` (the early-level assist). */
   directness?: number;
+  /** Random non-connecting decoy pieces to splice in (never in the first slots — see spliceIn). */
+  decoys?: number;
 }
 
 /** Splice `item` into `script` at a random index, never before index 2. */
@@ -164,7 +166,7 @@ function spliceIn(script: QueuePiece[], item: QueuePiece, rng: () => number): vo
  * of the game BOARD (see game.ts), never things you're handed.
  */
 export function buildChunk(opts: ChunkOpts): QueuePiece[] {
-  const { rows, cols, source, pathLen, crosses, tees, rng, target, directness = 0 } = opts;
+  const { rows, cols, source, pathLen, crosses, tees, rng, target, directness = 0, decoys = 0 } = opts;
 
   const script: QueuePiece[] = connectablePath(
     rows,
@@ -181,6 +183,10 @@ export function buildChunk(opts: ChunkOpts): QueuePiece[] {
   }
   for (let i = 0; i < tees; i++) {
     spliceIn(script, { type: randomTee(rng) }, rng);
+  }
+  // random duds to dump/overwrite — the backbone pieces all remain, so it's still solvable
+  for (let i = 0; i < decoys; i++) {
+    spliceIn(script, { type: randomPiece(rng) }, rng);
   }
 
   return script;

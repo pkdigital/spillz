@@ -11,6 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "lottie-web": "^5.13.0",
     "phaser": "^3.80.1"
   },
   "devDependencies": {
