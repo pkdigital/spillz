@@ -2189,17 +2189,18 @@ export class GameScene extends Phaser.Scene {
     g.fillRect(0, bot - 5, GAME_WIDTH, 5);
   }
 
-  /** The live "spill clock" shown in the banner spot: a 3·2·1 before the flow, and a 3·2·1 over
-   *  the last few segments as the dump is contained. null when neither applies. */
-  private spillCountdown(): string | null {
+  /** The live callout shown in the banner spot: a leak alarm, plus the "spill clock" — a 3·2·1
+   *  before the flow and over the last few segments as the dump is contained. null when none apply. */
+  private liveCallout(): { label: string; num: string | null; color: string } | null {
     const m = this.model;
+    if (m.state === "FLOWING" && m.leaking) return { label: "LEAK!", num: null, color: "#ff5c5c" };
     if (m.state === "COUNTDOWN") {
       const n = Math.ceil(m.countdownRemaining / 1000);
-      return n >= 1 ? `SPILL STARTING IN\n${n}` : null;
+      if (n >= 1) return { label: "SPILL STARTING IN", num: `${n}`, color: "#ffd24a" };
     }
     if (m.state === "FLOWING") {
       const rem = m.overflowTotal - m.overflowContained;
-      if (rem >= 1 && rem <= 3) return `SPILL STOPPING IN\n${rem}`;
+      if (rem >= 1 && rem <= 3) return { label: "SPILL STOPPING IN", num: `${rem}`, color: "#ffd24a" };
     }
     return null;
   }
@@ -2215,15 +2216,38 @@ export class GameScene extends Phaser.Scene {
     const cy = HUD_H + (this.pondTop - HUD_H) * 0.3;
     if (!this.banner || !playing || age > this.banner.hold) {
       this.banner = null;
-      // live spill countdowns take the banner spot once any queued banner has cleared
-      const live = playing ? this.spillCountdown() : null;
+      // live callouts (leak alarm / spill 3·2·1) take the banner spot once any queued banner clears
+      const live = playing ? this.liveCallout() : null;
       if (live) {
-        this.bannerText.setText(live).setPosition(GAME_WIDTH / 2, cy).setScale(1).setAlpha(1).setVisible(true);
+        const throb = 1 + 0.12 * Math.sin(this.clock / 160);
+        this.bannerText
+          .setText(live.label)
+          .setColor(live.color)
+          .setPosition(GAME_WIDTH / 2, cy)
+          .setScale(live.num ? 0.85 : throb) // the number does the pulsing when there is one
+          .setAlpha(1)
+          .setVisible(true);
+        if (live.num) {
+          this.countdownNum
+            .setText(live.num)
+            .setFontSize(56)
+            .setColor(live.color)
+            .setOrigin(0.5)
+            .setScale(1 + 0.2 * Math.sin(this.clock / 150)) // grow/shrink for emphasis
+            .setAlpha(1)
+            .setPosition(GAME_WIDTH / 2, cy + 50)
+            .setVisible(true);
+        } else {
+          this.countdownNum.setVisible(false);
+        }
       } else {
         this.bannerText.setVisible(false);
+        this.countdownNum.setVisible(false);
       }
       return;
     }
+    this.bannerText.setColor("#ffd24a"); // queued banners use the default amber
+    this.countdownNum.setVisible(false);
     const fadeIn = Math.min(1, age / 180);
     const fadeOut = Math.min(1, Math.max(0, (this.banner.hold - age) / 450));
     const alpha = Math.min(fadeIn, fadeOut);
@@ -2535,14 +2559,8 @@ export class GameScene extends Phaser.Scene {
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
 
-    this.centerText.setPosition(GAME_WIDTH / 2, this.pondTop / 2);
-    if (m.state === "COUNTDOWN") {
-      this.centerText.setText(""); // no "flow in" countdown text — the spill just starts
-    } else if (m.state === "FLOWING") {
-      this.centerText.setText(m.leaking ? "LEAK!" : "");
-    } else {
-      this.centerText.setText("");
-    }
+    // the countdown + LEAK! now live in the banner; centerText stays clear during play
+    this.centerText.setText("");
   }
 
   /** Modal end-of-level card framed as a real spill report — the player's single spill (duration,
