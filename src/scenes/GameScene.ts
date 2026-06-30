@@ -318,6 +318,7 @@ export class GameScene extends Phaser.Scene {
   private prevFront: QueuePiece | undefined;
   private slideOff: QueuePiece | undefined; // the piece that just left the active slot (slides off left)
   private rouletteStart = -9999; // reused as the queue slide-start clock
+  private queueShiftT = 0; // 0 = queue at its left home, 1 = slid to the right (out of the way)
 
   constructor() {
     super("GameScene");
@@ -397,6 +398,7 @@ export class GameScene extends Phaser.Scene {
     this.dragStartY = null;
     this.dragging = false;
     this.manualScrollUntil = 0;
+    this.queueShiftT = 0;
     this.toast = null;
     this.prevFront = undefined;
     this.rouletteStart = -9999;
@@ -1977,9 +1979,21 @@ export class GameScene extends Phaser.Scene {
 
     const tile = 56;
     const step = tile + 8;
-    const cx = QUEUE_W / 2;
     const topY = HUD_H + 48; // top of the queue stack, clear of the HUD band
     const n = m.queue.length; // constant (the model refills the queue to a fixed length)
+
+    // Smart reposition: if an open end (where the next piece goes) sits under the queue's column,
+    // glide the whole stack to the right edge so the player can see the cell they're building into.
+    const queueTopY = topY - step;
+    const queueBotY = topY + (n - 1) * step + tile / 2;
+    const obscuring = m.buildFrontier.some(
+      (f) =>
+        f.cell.col === CONFIG.hudCol &&
+        this.rowScreenY(f.cell.row) + CELL > queueTopY &&
+        this.rowScreenY(f.cell.row) < queueBotY,
+    );
+    this.queueShiftT += ((obscuring ? 1 : 0) - this.queueShiftT) * 0.1; // smooth glide
+    const cx = Phaser.Math.Linear(QUEUE_W / 2, GAME_WIDTH - QUEUE_W / 2, this.queueShiftT);
     const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
     const ee = 1 - Math.pow(1 - e, 3); // ease-out
 
@@ -2129,7 +2143,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** A power tile just fired: pop a labelled toast (the model already applied the effect). */
+  /** A power tile just fired: flash its label in the banner (same widget as "LEVEL N"). */
   private onPowerFired(power: PowerType): void {
     this.sfxPower(power);
     const LABELS: Record<PowerType, string> = {
@@ -2142,7 +2156,7 @@ export class GameScene extends Phaser.Scene {
       rain: "RAIN!",
       blitz: "PIPE BLITZ!",
     };
-    this.toast = { label: LABELS[power], icon: POWER_SPRITE[power], start: this.clock };
+    this.queueBanner([LABELS[power]], 1300);
   }
 
   /** Rain pouring over the grid while a rain marker is active — obscures the view (the cost),
