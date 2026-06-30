@@ -243,6 +243,8 @@ export class GameScene extends Phaser.Scene {
   private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[] } | null = null;
   /** Pending return to the title screen (run ended) — deferred out of the input callback. */
   private pendingMenu: { pendingScore: number; pendingLevel: number } | null = null;
+  /** Dev FPS readout — hidden by default, toggled with the backtick key. */
+  private showFps = false;
   /** While the smoke from a re-laid tile clears, placement is blocked (the overwrite time penalty). */
   private overwriteBusyUntil = 0;
   /** Player paused the run ("P"); the sim freezes and a RESUME overlay shows. */
@@ -503,6 +505,7 @@ export class GameScene extends Phaser.Scene {
     // player keys: Q = quit to title, P = pause/resume, Enter/Space = the shown button
     this.input.keyboard?.on("keydown-Q", () => this.quitToTitle());
     this.input.keyboard?.on("keydown-P", () => this.togglePause());
+    this.input.keyboard?.on("keydown-BACKTICK", () => (this.showFps = !this.showFps)); // ` toggles FPS
     this.input.keyboard?.on("keydown-ENTER", () => this.activatePrimaryButton());
     this.input.keyboard?.on("keydown-SPACE", () => this.activatePrimaryButton());
     // dev shortcuts: N = next level; D = kill a fish; F = fire the next power (cycles)
@@ -2453,7 +2456,8 @@ export class GameScene extends Phaser.Scene {
   private renderGauge(g: G): void {
     const m = this.model;
     const live = m.started && (m.state === "COUNTDOWN" || m.state === "FLOWING");
-    const target = live ? m.flowSpeedNorm : 0;
+    // frozen sewage isn't moving — drain the meter to zero while the freeze holds
+    const target = live && !m.frozen ? m.flowSpeedNorm : 0;
     this.gaugeF += (target - this.gaugeF) * 0.2; // smooth the per-ring jumps into a glow
     const f = Math.max(0, Math.min(1, this.gaugeF));
 
@@ -2469,17 +2473,17 @@ export class GameScene extends Phaser.Scene {
     g.fillStyle(0x0c0b0a, 1);
     g.fillRect(0, 0, GAME_WIDTH, HUD_H);
 
-    // --- the band, left to right: poo icon, two-line SCORE, then the LED strip filling the rest ---
+    // --- the band, left to right: poo icon, the LED strip, then the two-line SCORE on the right ---
     const h = 10;
     const mid = HUD_H / 2;
     const y = mid - h / 2; // strip top
     const pad = 6;
     const pooSz = 28;
     this.useSprite("poo", pad + pooSz / 2, mid, pooSz, Z_UI_SPRITE); // the poo dial face
-    const scoreX = pad + pooSz + 8;
-    this.statusText.setFontSize(11).setOrigin(0, 0.5).setLineSpacing(2).setPosition(scoreX, mid);
-    const x0 = scoreX + this.statusText.width + 12; // strip starts after the score block
-    const stripW = GAME_WIDTH - pad - x0;
+    // SCORE block pinned to the right edge; the strip fills the gap between the poo and it
+    this.statusText.setFontSize(11).setAlign("right").setOrigin(1, 0.5).setLineSpacing(2).setPosition(GAME_WIDTH - pad, mid);
+    const x0 = pad + pooSz + 8; // strip starts after the poo icon
+    const stripW = GAME_WIDTH - pad - this.statusText.width - 12 - x0; // ...and stops before the score
     const gap = 2;
     const cellW = (stripW - gap * (STEPS + 1)) / STEPS;
     g.fillStyle(0x05070c, 0.9); // dark backing so the LEDs read as cells
@@ -2499,7 +2503,8 @@ export class GameScene extends Phaser.Scene {
   private renderHud(): void {
     const m = this.model;
     this.statusText.setText(`SCORE\n${m.runScore}`); // two lines; positioned by the meter band
-    this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
+    this.fpsText.setVisible(this.showFps);
+    if (this.showFps) this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`).setPosition(8, this.viewH - 18);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
 
