@@ -1951,13 +1951,13 @@ export class GameScene extends Phaser.Scene {
     const tile = 56;
     const step = tile + 8;
     const cx = QUEUE_W / 2;
-    const topY = 56; // active slot, near the top (below the overlaid score)
-    const n = m.queue.length;
+    const topY = 68; // top of the queue stack (nudged down, below the overlaid score)
+    const n = m.queue.length; // constant (the model refills the queue to a fixed length)
     const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
     const ee = 1 - Math.pow(1 - e, 3); // ease-out
 
-    // the active slot highlight (fixed at the top); pieces slide up into it as you place
-    this.drawItemBox(g, cx, topY, tile + 8, 0.13);
+    // the active slot highlight sits at the BOTTOM of the stack — that's the current piece
+    this.drawItemBox(g, cx, topY + (n - 1) * step, tile + 8, 0.13);
 
     const drawTile = (py: number, qp: QueuePiece) => {
       if (py < topY - step || py > bandBot - tile / 2) return; // off the top / behind the gauge
@@ -1968,13 +1968,14 @@ export class GameScene extends Phaser.Scene {
       if (qp.dynamite) this.drawDynamiteBadge(g, cx, py, tile * 0.78);
     };
 
-    // current (queue[0]) arrives at topY; upcoming descend below it
+    // newest piece sits at the TOP and the current piece (queue[0]) is furthest down;
+    // on each placement the stack slides down a slot and a new tile drops in from the top
     for (let i = 0; i < n; i++) {
       const qp = m.queue[i];
       if (!qp) break;
-      drawTile(topY + (i + 1 - ee) * step, qp);
+      drawTile(topY + (n - 2 - i + ee) * step, qp);
     }
-    if (this.slideOff && ee < 1) drawTile(topY - ee * step, this.slideOff); // sliding off the top
+    if (this.slideOff && ee < 1) drawTile(topY + (n - 1 + ee) * step, this.slideOff); // sliding down out
   }
 
   /** A dynamite stick + spark overlaid on the next-piece box so a bomb reads as a bomb. */
@@ -2453,8 +2454,8 @@ export class GameScene extends Phaser.Scene {
   private renderGauge(g: G): void {
     const m = this.model;
     const R = 32;
-    const gx = QUEUE_W / 2; // centred in the queue overlay strip
-    const gy = this.pondTop - 16; // near the bottom of the strip, arc reaching up
+    const gx = GAME_WIDTH - R - 12; // top-right corner of the board
+    const gy = R + 14; // near the top, the semicircle arc reaching up
 
     // target needle fraction (0 = SAFE/left, 1 = SPILL/right) + the centre number
     let target = 0;
