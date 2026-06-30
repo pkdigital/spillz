@@ -32,12 +32,12 @@
         -webkit-user-select: none;
         user-select: none;
       }
+      /* Full-viewport host; Phaser's autoCenter (CENTER_BOTH) centres the canvas inside it.
+         No flexbox here — that would fight Phaser's centring and shove the canvas off to one side. */
       #game {
         width: 100vw;
         height: 100dvh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        overflow: hidden;
       }
     </style>
   </head>
