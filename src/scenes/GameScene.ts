@@ -2469,13 +2469,16 @@ export class GameScene extends Phaser.Scene {
     g.fillStyle(0x0c0b0a, 1);
     g.fillRect(0, 0, GAME_WIDTH, HUD_H);
 
-    // --- the poo-o-meter: a poo icon then the LED strip, on the meter row of the band ---
+    // --- the band, left to right: poo icon, two-line SCORE, then the LED strip filling the rest ---
     const h = 10;
-    const y = 24; // meter row (the score sits above it at y~8)
+    const mid = HUD_H / 2;
+    const y = mid - h / 2; // strip top
     const pad = 6;
-    const pooSz = 26;
-    this.useSprite("poo", pad + pooSz / 2, y + h / 2, pooSz, Z_UI_SPRITE); // the poo dial face
-    const x0 = pad + pooSz + 6; // strip starts after the icon
+    const pooSz = 28;
+    this.useSprite("poo", pad + pooSz / 2, mid, pooSz, Z_UI_SPRITE); // the poo dial face
+    const scoreX = pad + pooSz + 8;
+    this.statusText.setFontSize(11).setOrigin(0, 0.5).setLineSpacing(2).setPosition(scoreX, mid);
+    const x0 = scoreX + this.statusText.width + 12; // strip starts after the score block
     const stripW = GAME_WIDTH - pad - x0;
     const gap = 2;
     const cellW = (stripW - gap * (STEPS + 1)) / STEPS;
@@ -2495,7 +2498,7 @@ export class GameScene extends Phaser.Scene {
 
   private renderHud(): void {
     const m = this.model;
-    this.statusText.setText(`SCORE ${m.runScore}`);
+    this.statusText.setText(`SCORE\n${m.runScore}`); // two lines; positioned by the meter band
     this.fpsText.setText(`${Math.round(this.game.loop.actualFps)} fps`);
 
     if (m.state === "WON" || m.state === "GAMEOVER") return; // the end dialog owns the text
