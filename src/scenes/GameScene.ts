@@ -240,7 +240,7 @@ export class GameScene extends Phaser.Scene {
   private placedAnim = new Map<string, number>();
   private prevState: GameState = "COUNTDOWN";
   /** Pending (re)start — deferred out of the input callback to the next tick. */
-  private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[] } | null = null;
+  private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[]; autostart?: boolean } | null = null;
   /** Pending return to the title screen (run ended) — deferred out of the input callback. */
   private pendingMenu: { pendingScore: number; pendingLevel: number } | null = null;
   /** Dev FPS readout — hidden by default, toggled with the backtick key. */
@@ -356,7 +356,7 @@ export class GameScene extends Phaser.Scene {
     for (const s of SFX_NAMES) this.load.audio(`sfx-${s}`, `assets/sfx/${s}.mp3`);
   }
 
-  create(data?: { level?: number; fishSaved?: number; runScore?: number; seenHints?: string[] }): void {
+  create(data?: { level?: number; fishSaved?: number; runScore?: number; seenHints?: string[]; autostart?: boolean }): void {
     this.model = new Game(undefined, data?.level ?? 1, data?.fishSaved ?? 0, data?.runScore ?? 0);
     this.seenHints = new Set(data?.seenHints ?? []);
     this.banner = null;
@@ -526,6 +526,9 @@ export class GameScene extends Phaser.Scene {
       this.devPowerIdx++;
       this.model.devFirePower(power);
     });
+
+    // Advancing from a cleared level: skip the start card and go straight into the next spill.
+    if (data?.autostart) this.model.beginRun();
   }
 
   /** Point-in-rect test for the modal buttons. */
@@ -547,13 +550,15 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Advance to the next level, carrying the score + seen hints forward. */
+  /** Advance to the next level, carrying the score + seen hints forward. The player just dismissed
+   *  the clear card, so skip the start card and drop straight into the next spill. */
   private advanceLevel(): void {
     this.pendingRestart = {
       level: this.model.level + 1,
       fishSaved: this.model.fishSaved,
       runScore: this.model.runScore,
       seenHints: [...this.seenHints],
+      autostart: true,
     };
   }
 
@@ -2657,7 +2662,7 @@ export class GameScene extends Phaser.Scene {
 
     const intro =
       m.level === 1
-        ? "SPILLZ\n\nWater firms pump sewage\ninto our rivers.\n\nSave as many fish\nas you can!"
+        ? "Water firms pump sewage\ninto our rivers.\n\nSave as many fish\nas you can!"
         : `LEVEL ${m.level}\n\nLimit the damage.\nSave what fish you can.`;
     this.centerText.setPosition(GAME_WIDTH / 2, py + 86).setText(intro);
 
