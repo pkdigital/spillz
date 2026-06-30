@@ -299,6 +299,7 @@ export class GameScene extends Phaser.Scene {
   // --- juice / SFX state ---
   private prevContained = 0; // for the per-segment flow blip
   private prevLeaking = false; // for leak-start / cap sounds
+  private easedBanner = false; // "SPILL EASING" banner fired once per level
   private lastSploshAt = 0; // throttle the river-splash sound
   private flashUntil = -1; // full-screen colour flash (surge / win)
   private flashColor = 0xffffff;
@@ -340,6 +341,7 @@ export class GameScene extends Phaser.Scene {
     this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
     this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
     this.load.svg("rock", "assets/decor/rock.svg", { width: 128, height: 128 });
+    this.load.svg("poo", "assets/decor/poo.svg", { width: 64, height: 64 });
     for (let i = 1; i <= 5; i++) {
       this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 96, height: 96 });
       // a greyscale copy of the SAME species shape — a corpse should read as the same fish, drained
@@ -382,6 +384,7 @@ export class GameScene extends Phaser.Scene {
     this.blitzStrikes = [];
     this.prevContained = 0;
     this.prevLeaking = false;
+    this.easedBanner = false;
     this.lastSploshAt = 0;
     this.flashUntil = -1;
     this.winDrainStart = -1;
@@ -811,6 +814,11 @@ export class GameScene extends Phaser.Scene {
       if (m.overflowContained > this.prevContained) this.sfxFlow(m.overflowPct / 100);
       if (m.leaking && !this.prevLeaking) { this.sfxLeak(); this.cameras.main.shake(180, 0.01); }
       if (!m.leaking && this.prevLeaking) this.sfxCap();
+      // the surge subsiding near the end — flashed in the banner spot
+      if (!this.easedBanner && m.overflowTotal > 0 && m.overflowContained / m.overflowTotal >= 0.75) {
+        this.easedBanner = true;
+        this.queueBanner(["SPILL EASING"], 1400);
+      }
     }
     this.prevContained = m.overflowContained;
     this.prevLeaking = m.leaking;
@@ -837,6 +845,7 @@ export class GameScene extends Phaser.Scene {
     if (this.model.started && !this.prevStarted) {
       this.runBeganAt = this.clock; // start the obstacles-spin-in / queue-slide reveal
       this.queueBanner([`LEVEL ${this.model.level}`], 1900); // level-start flash
+      this.queueBanner(["SPILL STARTING!"], 1400); // ...then the spill-starting cue (after LEVEL N)
     }
     this.prevStarted = this.model.started;
     // first fatberg of the run — flashed once it scrolls into view
@@ -2456,20 +2465,24 @@ export class GameScene extends Phaser.Scene {
       this.lastGaugeStep = lit;
     }
 
-    // --- the LED strip: full-width, just above the pond ---
-    const W = GAME_WIDTH;
-    const h = 9;
-    const y = this.pondTop - 18;
+    // --- the poo-o-meter: a poo icon at the top-left, then the LED strip filling the rest ---
+    const h = 10;
+    const y = 22; // up at the top
+    const pad = 6;
+    const pooSz = 26;
+    this.useSprite("poo", pad + pooSz / 2, y + h / 2, pooSz, Z_UI_SPRITE); // the poo dial face
+    const x0 = pad + pooSz + 6; // strip starts after the icon
+    const stripW = GAME_WIDTH - pad - x0;
     const gap = 2;
-    const cellW = (W - gap * (STEPS + 1)) / STEPS;
+    const cellW = (stripW - gap * (STEPS + 1)) / STEPS;
     g.fillStyle(0x05070c, 0.9); // dark backing so the LEDs read as cells
-    g.fillRect(0, y - 3, W, h + 6);
+    g.fillRect(x0 - 2, y - 3, stripW + 4, h + 6);
     for (let i = 0; i < STEPS; i++) {
       const frac = (i + 0.5) / STEPS;
       const col = frac < 0.4 ? 0x4ade80 : frac < 0.62 ? 0xf6c453 : 0xff5c5c; // RAG by position
       const on = i < lit;
       g.fillStyle(col, on ? 1 : 0.14); // lit vs dim
-      g.fillRect(gap + i * (cellW + gap), y, cellW, h);
+      g.fillRect(x0 + gap + i * (cellW + gap), y, cellW, h);
     }
 
     this.countdownLabel.setVisible(false);

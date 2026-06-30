@@ -573,6 +573,9 @@ export class TitleScene extends Phaser.Scene {
     const cx = GAME_WIDTH / 2;
     const H = this.viewH;
 
+    // hide the initials-entry widgets once we're back on the menu (e.g. after confirming a score)
+    for (const k of ["entryHead", "entrySub", "okLabel", "slot0", "slot1", "slot2"]) this.texts[k]?.setVisible(false);
+
     // pulsing chromatic title
     const pulse = 1 + Math.sin(this.clock / 320) * 0.05;
     const ty = Math.min(96, H * 0.1);
