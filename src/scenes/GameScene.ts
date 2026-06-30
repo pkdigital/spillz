@@ -186,6 +186,7 @@ const PLACE_ANIM_MS = 170;
 const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
 const WIN_DRAIN_MS = 1500; // on a win, the flow eases to a stop + the pipes drain before the card
 const OVERWRITE_BUSY_MS = 1100; // re-laying a tile blocks the next placement while the smoke clears (time penalty)
+const GAUGE_STEPS = 12; // the spill strip is divided into this many "major steps" (one tick each)
 const FACTS: { fact: string; source: string }[] = factsData.facts;
 // End-screen gut-punch: the player's single spill vs the real 2024 scale (one per level, cycled).
 const COMPARISONS: string[] = [
@@ -289,7 +290,8 @@ export class GameScene extends Phaser.Scene {
   private bannerText!: Phaser.GameObjects.Text;
   private countdownLabel!: Phaser.GameObjects.Text; // small "SPILL" caption under the gauge
   private countdownNum!: Phaser.GameObjects.Text; // the gauge's centre readout (3·2·1 / segments left)
-  private gaugeF = 0; // smoothed needle position (0 = SAFE, 1 = SPILL)
+  private gaugeF = 0; // smoothed marker position (0 = SAFE, 1 = SPILL)
+  private lastGaugeStep = -999; // last quantised gauge step that ticked
   /** One-time hints already shown THIS RUN (survives level restarts via the scene data). */
   private seenHints = new Set<string>();
   private prevStarted = false;
@@ -384,6 +386,7 @@ export class GameScene extends Phaser.Scene {
     this.flashUntil = -1;
     this.winDrainStart = -1;
     this.gaugeF = 0;
+    this.lastGaugeStep = -999;
     this.endButton = null;
     this.startButton = null;
     this.dragStartY = null;
@@ -638,6 +641,7 @@ export class GameScene extends Phaser.Scene {
   private sfxFlow(pct: number): void { this.playSfx("flow", () => this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160), 0.35); }
   private sfxLeak(): void { this.playSfx("leak", () => { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); }); }
   private sfxCap(): void { this.playSfx("cap", () => this.tone(260, 130, "square", 0.05, 540)); }
+  private sfxTick(): void { this.playSfx("tick", () => this.tone(1100, 26, "square", 0.02, 1100), 0.22); }
   private sfxWin(): void { this.playSfx("win", () => [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 200, "triangle", 0.06, f, i * 110))); }
   private sfxLose(): void { this.playSfx("lose", () => this.tone(330, 650, "sawtooth", 0.06, 80)); }
   private sfxSplosh(): void { this.playSfx("splosh", () => { this.noise(240, 0.03, 2600, 280, 2, 40); this.tone(420, 200, "sine", 0.02, 150); }, 0.16); }
@@ -1087,9 +1091,8 @@ export class GameScene extends Phaser.Scene {
     this.renderRain(u); // rain pour while a rain marker is active
     this.renderPond(u);
     this.renderHud();
-    // queue + gauge overlay the board on the translucent layer (drawn queue-first so the gauge sits on top)
-    this.renderQueue(this.gfxQueue);
-    this.renderGauge(this.gfxQueue);
+    this.renderQueue(this.gfxQueue); // the next-pipe queue overlays the board (translucent layer)
+    this.renderGauge(u); // the spill strip — full opacity so the RAG colours read clearly
     this.renderDrips(u); // falling spilled sewage, on top of everything
     this.renderJunkDrops();
     this.renderToast(u);
@@ -2436,81 +2439,41 @@ export class GameScene extends Phaser.Scene {
   /** A diegetic sewer pressure gauge (top-right): the needle climbs SAFE→SPILL over the pre-flow
    *  3·2·1, then sweeps SPILL→SAFE as you contain the dump. Centre readout = seconds, then segments
    *  left. Both phases of "the spill clock" in one widget. */
+  /** The spill meter: a full-width LED strip that lights up from the left (SAFE green) toward the
+   *  right (SPILL red) as the sewage gathers speed, dimming as it slows. A tick per LED change. */
   private renderGauge(g: G): void {
     const m = this.model;
-    const R = 32;
-    const gx = GAME_WIDTH - R - 12; // top-right corner of the board
-    const gy = R + 14; // near the top, the semicircle arc reaching up
+    const live = m.started && (m.state === "COUNTDOWN" || m.state === "FLOWING");
+    const target = live ? m.flowSpeedNorm : 0;
+    this.gaugeF += (target - this.gaugeF) * 0.2; // smooth the per-ring jumps into a glow
+    const f = Math.max(0, Math.min(1, this.gaugeF));
 
-    // target needle fraction (0 = SAFE/left, 1 = SPILL/right) + the centre number
-    let target = 0;
-    let num = "";
-    if (!m.started || m.state === "WON") {
-      target = 0;
-    } else if (m.state === "GAMEOVER") {
-      target = 1;
-    } else if (m.state === "COUNTDOWN") {
-      target = 1 - m.countdownRemaining / CONFIG.countdownMs; // danger building toward SPILL
-      const n = Math.ceil(m.countdownRemaining / 1000);
-      if (n >= 1) num = `${n}`;
-    } else {
-      // FLOWING: needle releases toward SAFE as it's contained; number ONLY for the final countdown
-      target = 1 - Math.min(1, m.overflowContained / m.overflowTotal);
-      const remaining = m.overflowTotal - m.overflowContained;
-      if (remaining >= 1 && remaining <= 5) num = `${remaining}`;
-    }
-    this.gaugeF += (target - this.gaugeF) * 0.18; // smooth the per-segment steps
-
-    // --- semicircle face (flat side down): metal rim + dark half-disk ---
-    const halfDisk = (rad: number, col: number) => {
-      g.fillStyle(col, 1);
-      g.beginPath();
-      g.moveTo(gx, gy);
-      g.arc(gx, gy, rad, Math.PI, Math.PI * 2, false);
-      g.closePath();
-      g.fillPath();
-    };
-    halfDisk(R + 4, 0x23262b);
-    halfDisk(R + 2, 0x53585f);
-    halfDisk(R, 0x121317);
-
-    // --- colour zones along the arc (PI .. 2PI), SAFE green left -> SPILL red right ---
-    const A0 = Math.PI;
-    const span = Math.PI;
-    const zone = (t0: number, t1: number, col: number) => {
-      g.lineStyle(6, col, 0.92);
-      g.beginPath();
-      g.arc(gx, gy, R - 8, A0 + span * t0, A0 + span * t1, false);
-      g.strokePath();
-    };
-    zone(0, 0.4, 0x4ade80); // SAFE
-    zone(0.4, 0.62, 0xf6c453); // warning
-    zone(0.62, 1, 0xff5c5c); // SPILL
-
-    // --- ticks ---
-    g.lineStyle(1.5, 0x9aa0a8, 0.7);
-    for (let i = 0; i <= 8; i++) {
-      const a = A0 + span * (i / 8);
-      const c = Math.cos(a);
-      const s = Math.sin(a);
-      g.lineBetween(gx + (R - 2) * c, gy + (R - 2) * s, gx + (R - 12) * c, gy + (R - 12) * s);
+    const STEPS = GAUGE_STEPS;
+    const lit = Math.round(f * STEPS);
+    // tick on every LED step the flow lights/extinguishes (only while the run is live)
+    if (live && lit !== this.lastGaugeStep) {
+      if (this.lastGaugeStep !== -999) this.sfxTick();
+      this.lastGaugeStep = lit;
     }
 
-    // --- needle ---
-    const wob = m.state === "FLOWING" ? Math.sin(this.clock / 90) * 0.015 : 0;
-    const a = A0 + span * Math.max(0, Math.min(1, this.gaugeF)) + wob;
-    g.lineStyle(3, 0xfff2cc, 0.95);
-    g.lineBetween(gx, gy, gx + (R - 10) * Math.cos(a), gy + (R - 10) * Math.sin(a));
-    g.fillStyle(0xff5c5c, 1); g.fillCircle(gx, gy, 5); // hub
-    g.fillStyle(0x121317, 1); g.fillCircle(gx, gy, 2.5);
+    // --- the LED strip: full-width, just above the pond ---
+    const W = GAME_WIDTH;
+    const h = 9;
+    const y = this.pondTop - 18;
+    const gap = 2;
+    const cellW = (W - gap * (STEPS + 1)) / STEPS;
+    g.fillStyle(0x05070c, 0.9); // dark backing so the LEDs read as cells
+    g.fillRect(0, y - 3, W, h + 6);
+    for (let i = 0; i < STEPS; i++) {
+      const frac = (i + 0.5) / STEPS;
+      const col = frac < 0.4 ? 0x4ade80 : frac < 0.62 ? 0xf6c453 : 0xff5c5c; // RAG by position
+      const on = i < lit;
+      g.fillStyle(col, on ? 1 : 0.14); // lit vs dim
+      g.fillRect(gap + i * (cellW + gap), y, cellW, h);
+    }
 
-    // --- centre number (inside the arc, above the pivot) ---
     this.countdownLabel.setVisible(false);
-    if (num) {
-      this.countdownNum.setText(num).setFontSize(15).setPosition(gx, gy - R * 0.46).setVisible(true);
-    } else {
-      this.countdownNum.setVisible(false);
-    }
+    this.countdownNum.setVisible(false);
   }
 
   private renderHud(): void {

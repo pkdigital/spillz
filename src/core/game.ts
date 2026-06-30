@@ -16,6 +16,7 @@ import {
   obstacleChance,
   overflowFor,
   rockChance,
+  rockClusterBoost,
   teesForLevel,
 } from "./levels";
 import type { Coord, FlowEvent, GameState, PieceType, PowerType, QueuePiece } from "./types";
@@ -51,6 +52,8 @@ export const CONFIG = {
   flowSpeedupPerLevel: 70,
   minFlowIntervalMs: 620,
   maxFlowIntervalMs: 2600,
+  /** Per-ring random wobble on the flow rate (±fraction) — the sewage surges and stalls a little. */
+  flowJitter: 0.3,
   sourceCol: 3,
   /** Column the on-screen next-pipe queue HUD overlays — kept clear of seeded
    *  obstacles/powers so they're never hidden behind it (the player can still build there). */
@@ -418,11 +421,19 @@ export class Game {
       this.obstacleRow++;
       const r = this.obstacleRow;
       const clog = obstacleChance(r);
-      const rock = rockChance(this.level, r);
+      const rockBase = rockChance(this.level, r);
+      const cluster = rockClusterBoost(this.level);
       for (let col = 0; col < CONFIG.cols; col++) {
         if (col === CONFIG.hudCol) continue; // keep the queue-HUD column clear of seeded content
         const c = { row: r, col };
         if (!this.grid.isEmpty(c)) continue;
+        // late-game clustering: a boulder next to an already-seeded one is far more likely
+        let rock = rockBase;
+        if (rockBase > 0 && cluster > 0) {
+          const leftRock = col > 0 && this.grid.get({ row: r, col: col - 1 })?.type === "rock";
+          const upRock = this.grid.get({ row: r - 1, col })?.type === "rock";
+          if (leftRock || upRock) rock = Math.min(0.62, rockBase + cluster);
+        }
         const roll = this.rng();
         if (col !== CONFIG.sourceCol && roll < rock) {
           // a boulder: impassable AND can't be built through — route around it or blow it up.
@@ -809,7 +820,17 @@ export class Game {
     const intensity = Math.min(up, down);
     const ramp = CONFIG.flowIntervalMs + (CONFIG.flowFastMs - CONFIG.flowIntervalMs) * intensity;
     const base = ramp - (this.level - 1) * CONFIG.flowSpeedupPerLevel;
-    return Math.max(CONFIG.minFlowIntervalMs, Math.min(CONFIG.maxFlowIntervalMs, base + this.flowMod));
+    // a per-ring random wobble so the flow gathers speed and stalls unevenly (Math.random, not the
+    // seeded rng, so it never disturbs the reproducible board/queue stream)
+    const jitter = 1 + (Math.random() * 2 - 1) * CONFIG.flowJitter;
+    return Math.max(CONFIG.minFlowIntervalMs, Math.min(CONFIG.maxFlowIntervalMs, base * jitter + this.flowMod));
+  }
+
+  /** Current flow speed normalised 0 (slowest) .. 1 (fastest) — drives the LED spill meter. */
+  get flowSpeedNorm(): number {
+    const range = CONFIG.maxFlowIntervalMs - CONFIG.minFlowIntervalMs;
+    if (range <= 0) return 0;
+    return Math.max(0, Math.min(1, (CONFIG.maxFlowIntervalMs - this.currentFlowMs) / range));
   }
 
   /** Advance the flood one ring: drain for current leaks, then fill the next ring. */

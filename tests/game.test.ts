@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { CONFIG, Game } from "../src/core/game";
 
+CONFIG.flowJitter = 0; // deterministic flow timing for these tests (production wobbles it)
+
 /** Lay a pipe under the toilet (this starts the run) and run out the countdown. */
 function start(g: Game): void {
   g.grid.place({ row: 1, col: CONFIG.sourceCol }, "straight-v");

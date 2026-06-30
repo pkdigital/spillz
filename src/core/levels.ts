@@ -39,11 +39,19 @@ export const POWER_CELL_CHANCE = 0.05;
 
 /** First level rocks (impassable, blow-up-able boulders) can appear. */
 export const ROCK_START_ROW = 5;
-/** Per-cell chance an impassable rock is seeded (off the source column). Rare + strategic; you
- *  route around it or spend dynamite to clear the cell. Climbs a touch with depth. */
+/** Level from which rocks start clumping into nasty fields. */
+export const ROCK_CLUSTER_LEVEL = 7;
+/** Per-cell chance an impassable rock is seeded (off the source column). The most painful
+ *  obstacle — so it gets steadily more common with depth and level (no longer caps early). */
 export function rockChance(level: number, row: number): number {
   if (level < 2 || row < ROCK_START_ROW) return 0;
-  return Math.min(0.02 + (level - 2) * 0.006, 0.055);
+  return Math.min(0.02 + (level - 2) * 0.013, 0.16);
+}
+/** Late-game clustering: a rock seeded next to an existing one gets this much added chance, so
+ *  boulders clump into walls (route around them, or blow a gap with dynamite). 0 until late. */
+export function rockClusterBoost(level: number): number {
+  if (level < ROCK_CLUSTER_LEVEL) return 0;
+  return Math.min(0.5, (level - ROCK_CLUSTER_LEVEL + 1) * 0.09);
 }
 
 /**
