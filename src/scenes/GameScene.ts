@@ -1978,7 +1978,7 @@ export class GameScene extends Phaser.Scene {
     const tile = 56;
     const step = tile + 8;
     const cx = QUEUE_W / 2;
-    const topY = 68; // top of the queue stack (nudged down, below the overlaid score)
+    const topY = HUD_H + 48; // top of the queue stack, clear of the HUD band
     const n = m.queue.length; // constant (the model refills the queue to a fixed length)
     const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
     const ee = 1 - Math.pow(1 - e, 3); // ease-out
@@ -2455,16 +2455,16 @@ export class GameScene extends Phaser.Scene {
    *  right (SPILL red) as the sewage gathers speed, dimming as it slows. A tick per LED change. */
   private renderGauge(g: G): void {
     const m = this.model;
-    const live = m.started && (m.state === "COUNTDOWN" || m.state === "FLOWING");
-    // frozen sewage isn't moving — drain the meter to zero while the freeze holds
-    const target = live && !m.frozen ? m.flowSpeedNorm : 0;
+    // empty until the sewage is actually flowing (and zero while frozen — it isn't moving)
+    const flowing = m.started && m.state === "FLOWING";
+    const target = flowing && !m.frozen ? m.flowSpeedNorm : 0;
     this.gaugeF += (target - this.gaugeF) * 0.2; // smooth the per-ring jumps into a glow
     const f = Math.max(0, Math.min(1, this.gaugeF));
 
     const STEPS = GAUGE_STEPS;
     const lit = Math.round(f * STEPS);
-    // tick on every LED step the flow lights/extinguishes (only while the run is live)
-    if (live && lit !== this.lastGaugeStep) {
+    // tick on every LED step the flow lights/extinguishes (only while flowing)
+    if (flowing && lit !== this.lastGaugeStep) {
       if (this.lastGaugeStep !== -999) this.sfxTick();
       this.lastGaugeStep = lit;
     }
