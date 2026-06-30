@@ -20,11 +20,23 @@ interface Drifter {
 }
 
 type Mode = "menu" | "entry";
+// icons drawn procedurally (no in-game asset exists for these — they're Graphics in-game too)
+type ProcKind = "pipe" | "source" | "dynamite" | "spill";
+
+// the real game assets we show in the instructions (keys match GameScene's preload)
+const JUNK_KEYS = ["wet-wipes", "cotton-buds", "condom", "sanitary-pad"] as const;
 
 interface TitleData {
   pendingScore?: number;
   pendingLevel?: number;
 }
+
+// auto-scroll feel
+const SCROLL_SPEED = 55; // px/s downward
+const STEP_PAUSE = 1100; // dwell at each step
+const TOP_PAUSE = 1500; // dwell at the very top
+const BOTTOM_PAUSE = 2200; // dwell at the very bottom before gliding back
+const RESUME_AFTER = 4000; // ms of no touch before auto-scroll takes back over
 
 export class TitleScene extends Phaser.Scene {
   private bg!: Phaser.GameObjects.Graphics;
@@ -34,7 +46,7 @@ export class TitleScene extends Phaser.Scene {
   private stars: Star[] = [];
   private drifters: Drifter[] = [];
 
-  // text pool
+  // text pool (fixed chrome only — scrolling instructions live in the container)
   private titleLayers: Phaser.GameObjects.Text[] = [];
   private texts: Record<string, Phaser.GameObjects.Text> = {};
 
@@ -48,7 +60,28 @@ export class TitleScene extends Phaser.Scene {
   private initials = ["A", "A", "A"];
   private slot = 0;
 
-  // hit rects rebuilt each frame; tapped in pointerdown
+  // scrolling instructions panel
+  private scrollC: Phaser.GameObjects.Container | null = null;
+  private maskShape: Phaser.GameObjects.Graphics | null = null;
+  private scoreText: Phaser.GameObjects.Text | null = null;
+  private viewportTop = 0;
+  private viewportH = 0;
+  private contentH = 0;
+  private maxScroll = 0;
+  private scrollY = 0;
+  private scrollTarget = 0;
+  private holdUntil = 0; // clock time to dwell until
+  private returning = false; // gliding back to the top
+  private userUntil = 0; // suppress auto-scroll until this clock time
+
+  // pointer / drag
+  private dragStartY: number | null = null;
+  private dragStartScroll = 0;
+  private dragging = false;
+  private dragMoved = false;
+  private pressingPlay = false;
+
+  // hit rects rebuilt each frame; tapped in pointer handlers
   private playBtn: Phaser.Geom.Rectangle | null = null;
   private okBtn: Phaser.Geom.Rectangle | null = null;
   private arrowBtns: { rect: Phaser.Geom.Rectangle; slot: number; dir: number }[] = [];
@@ -57,17 +90,34 @@ export class TitleScene extends Phaser.Scene {
     super("TitleScene");
   }
 
+  // Load the SAME art the game uses, so the instructions show the real tiles. A 404 is
+  // harmless (we guard every add.image with textures.exists). Keys match GameScene.
+  preload(): void {
+    this.load.on("loaderror", () => {});
+    for (const j of JUNK_KEYS) this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 72, height: 72 });
+    this.load.image("power-faucet", "assets/power/faucet.png");
+    this.load.image("power-fist", "assets/power/fist.png");
+    this.load.image("power-star", "assets/power/star.png");
+    this.load.image("power-snowflake", "assets/power/snowflake.png");
+    this.load.image("power-poison", "assets/power/poison.png");
+    this.load.image("power-rain", "assets/power/rain.png");
+    this.load.image("power-blitz", "assets/power/lightning.png");
+    this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
+    this.load.svg("rock", "assets/decor/rock.svg", { width: 128, height: 128 });
+    this.load.svg("fish-1", "assets/decor/fish-1.svg", { width: 96, height: 96 });
+  }
+
   create(data?: TitleData): void {
     this.clock = 0;
     this.scores = loadScores();
     this.cameras.main.setBackgroundColor("#000000");
-    // Phaser reuses the scene instance across scene.start — drop stale (destroyed)
-    // GameObject references before we recreate them all below.
+    // Phaser reuses the scene instance across scene.start — drop stale (destroyed) refs.
     this.texts = {};
     this.titleLayers = [];
     this.playBtn = null;
     this.okBtn = null;
     this.arrowBtns = [];
+    this.destroyScroll();
 
     this.bg = this.add.graphics().setDepth(0);
     this.ui = this.add.graphics().setDepth(5);
@@ -78,7 +128,7 @@ export class TitleScene extends Phaser.Scene {
       y: Math.random() * this.viewH,
       z: 0.2 + Math.random() * 0.8,
     }));
-    this.drifters = Array.from({ length: 10 }, (_, i) => this.spawnDrifter(i % 2 === 0));
+    this.drifters = Array.from({ length: 7 }, (_, i) => this.spawnDrifter(i % 2 === 0));
 
     // chromatic title layers (cyan/magenta ghosts behind a white core)
     this.titleLayers = [0x00f6ff, 0xff2d95, 0xffffff].map((c) =>
@@ -95,13 +145,6 @@ export class TitleScene extends Phaser.Scene {
         .setDepth(depth);
     };
     mk("tagline", 11, "#00f6ff");
-    mk("howHead", 13, "#fff200");
-    mk("doHead", 11, "#39ff14");
-    mk("doBody", 10, "#cfe8d0"); // body lines
-    mk("avoidHead", 11, "#ff2d95");
-    mk("avoidBody", 10, "#f0cdd8");
-    mk("scoreHead", 13, "#fff200");
-    mk("scoreBody", 12, "#e8e2d4");
     mk("playLabel", 16, "#000000", 12);
     mk("entryHead", 14, "#fff200");
     mk("entrySub", 10, "#00f6ff");
@@ -117,9 +160,13 @@ export class TitleScene extends Phaser.Scene {
       this.pendingLevel = data?.pendingLevel ?? 1;
       this.initials = ["A", "A", "A"];
       this.slot = 0;
+    } else {
+      this.buildScroll();
     }
 
-    this.input.on("pointerdown", this.onTap, this);
+    this.input.on("pointerdown", this.onDown, this);
+    this.input.on("pointermove", this.onMove, this);
+    this.input.on("pointerup", this.onUp, this);
     this.setupKeyboard();
   }
 
@@ -139,6 +186,170 @@ export class TitleScene extends Phaser.Scene {
     return this.scale.gameSize.height;
   }
 
+  // ----------------------------------------------- scrolling instructions ----
+  private destroyScroll(): void {
+    this.scrollC?.destroy(true); // destroys child gfx + texts
+    this.maskShape?.destroy();
+    this.scrollC = null;
+    this.maskShape = null;
+    this.scoreText = null;
+  }
+
+  /** Build the tall instructions filmstrip (icons + text + high scores) and mask it to a viewport. */
+  private buildScroll(): void {
+    this.destroyScroll();
+    const H = this.viewH;
+    const cx = GAME_WIDTH / 2;
+    const ty = Math.min(96, H * 0.1);
+    this.viewportTop = ty + 76; // below the tagline
+    const playTop = H - 60 - 40; // PLAY button top (bh 60 + margin 40)
+    this.viewportH = Math.max(140, playTop - 24 - this.viewportTop);
+
+    const c = this.add.container(0, this.viewportTop).setDepth(2);
+    this.scrollC = c;
+    const g = this.add.graphics();
+    c.add(g);
+
+    let y = 12;
+    const header = (text: string, color: string) => {
+      y += 10;
+      const t = this.add
+        .text(cx, y + 8, text, { fontFamily: ARCADE_FONT, fontSize: "14px", color, align: "center" })
+        .setOrigin(0.5, 0.5);
+      c.add(t);
+      y += 32;
+    };
+    // one instruction row: a real game image (if loaded) OR a procedural glyph, plus text
+    const item = (text: string, opts: { img?: string; proc?: ProcKind; color?: number }) => {
+      const rowH = text.includes("\n") ? 54 : 42;
+      const iconY = y + rowH / 2;
+      let placed = false;
+      if (opts.img && this.textures.exists(opts.img)) {
+        const img = this.add.image(46, iconY, opts.img);
+        img.setScale(34 / Math.max(img.width, img.height));
+        c.add(img);
+        placed = true;
+      }
+      if (!placed && opts.proc) this.drawProcIcon(g, opts.proc, 46, iconY, 30, opts.color ?? 0xffffff);
+      const t = this.add
+        .text(82, iconY, text, {
+          fontFamily: ARCADE_FONT,
+          fontSize: "10px",
+          color: "#dfe6e0",
+          align: "left",
+          lineSpacing: 6,
+        })
+        .setOrigin(0, 0.5);
+      c.add(t);
+      y += rowH;
+    };
+
+    header("HOW TO PLAY", "#fff200");
+    header("DO", "#39ff14");
+    item("LAY PIPE TO GUIDE\nTHE SEWAGE DOWN", { proc: "pipe" });
+    item("IT POURS FROM\nTHE OUTLET", { proc: "source" });
+    item("SAVE THE FISH\nIN THE POND", { img: "fish-1" });
+
+    header("POWER TILES", "#3fd0ff");
+    item("STAR - BONUS SCORE", { img: "power-star" });
+    item("FIST - PROTEST,\nHEALS THE RIVER", { img: "power-fist" });
+    item("FAUCET - SPEED\nUP OR DOWN", { img: "power-faucet" });
+    item("FREEZE - STOPS\nTHE FLOW BRIEFLY", { img: "power-snowflake" });
+    item("RAIN - HEALS BUT\nHIDES THE BOARD", { img: "power-rain" });
+    item("BLITZ - SCATTERS\nFREE PIPE PIECES", { img: "power-blitz" });
+
+    header("AVOID", "#ff2d95");
+    item("SPILLS - OPEN ENDS\nLEAK FILTH", { proc: "spill", color: 0xff5c5c });
+    item("POISON - KILLS\nA FISH INSTANTLY", { img: "power-poison" });
+    item("WET WIPES -\nCLOG THE PIPE", { img: "junk-wet-wipes" });
+    item("COTTON BUDS -\nUNFLUSHABLE", { img: "junk-cotton-buds" });
+    item("CONDOM -\nUNFLUSHABLE", { img: "junk-condom" });
+    item("SANITARY PAD -\nUNFLUSHABLE", { img: "junk-sanitary-pad" });
+    item("FATBERG - BLOCKS\nA 2x2 AREA", { img: "fatberg" });
+    item("ROCK - IMPASSABLE", { img: "rock" });
+    item("DYNAMITE - BLASTS\nROCKS & FATBERGS", { proc: "dynamite" });
+
+    y += 16;
+    header("HIGH SCORES", "#fff200");
+    const rows = this.scores
+      .map((h, i) => {
+        const rank = String(i + 1).padStart(2, " ");
+        const name = h.name.padEnd(3, " ");
+        const sc = String(h.score).padStart(6, " ");
+        const mark = i === this.newRank ? " <" : "";
+        return `${rank} ${name} ${sc}  L${h.level}${mark}`;
+      })
+      .join("\n");
+    const st = this.add
+      .text(cx, y, rows, { fontFamily: ARCADE_FONT, fontSize: "12px", color: "#e8e2d4", align: "left", lineSpacing: 7 })
+      .setOrigin(0.5, 0);
+    c.add(st);
+    this.scoreText = st;
+    y += st.height + 18;
+
+    this.contentH = y;
+    this.maxScroll = Math.max(0, this.contentH - this.viewportH);
+
+    // geometry mask clips the container to the viewport band
+    const shape = this.make.graphics();
+    shape.fillStyle(0xffffff);
+    shape.fillRect(0, this.viewportTop, GAME_WIDTH, this.viewportH);
+    this.maskShape = shape;
+    c.setMask(shape.createGeometryMask());
+
+    // start the auto-scroll cycle at the top
+    this.scrollY = 0;
+    this.returning = false;
+    this.scrollTarget = Math.min(this.maxScroll, this.stepSize());
+    this.holdUntil = this.clock + TOP_PAUSE;
+    this.userUntil = 0;
+  }
+
+  private stepSize(): number {
+    return Math.max(80, this.viewportH * 0.5);
+  }
+
+  private updateScroll(dMs: number): void {
+    if (!this.scrollC) return;
+    const auto = this.clock >= this.userUntil && !this.dragging;
+    if (auto && this.maxScroll > 0) {
+      if (this.clock >= this.holdUntil) {
+        if (this.returning) {
+          this.scrollY += (0 - this.scrollY) * Math.min(1, dMs * 0.005);
+          if (this.scrollY <= 0.5) {
+            this.scrollY = 0;
+            this.returning = false;
+            this.scrollTarget = Math.min(this.maxScroll, this.stepSize());
+            this.holdUntil = this.clock + TOP_PAUSE;
+          }
+        } else {
+          // resuming after a manual scroll past the old target — re-aim downward
+          if (this.scrollTarget <= this.scrollY + 0.5) {
+            if (this.scrollY >= this.maxScroll - 0.5) {
+              this.returning = true;
+              this.holdUntil = this.clock + BOTTOM_PAUSE;
+            } else {
+              this.scrollTarget = Math.min(this.maxScroll, this.scrollY + this.stepSize());
+            }
+          }
+          this.scrollY = Math.min(this.scrollTarget, this.scrollY + (SCROLL_SPEED * dMs) / 1000);
+          if (this.scrollY >= this.scrollTarget - 0.5) {
+            this.scrollY = this.scrollTarget;
+            if (this.scrollTarget >= this.maxScroll) {
+              this.returning = true;
+              this.holdUntil = this.clock + BOTTOM_PAUSE;
+            } else {
+              this.holdUntil = this.clock + STEP_PAUSE;
+              this.scrollTarget = Math.min(this.maxScroll, this.scrollTarget + this.stepSize());
+            }
+          }
+        }
+      }
+    }
+    this.scrollY = Phaser.Math.Clamp(this.scrollY, 0, this.maxScroll);
+    this.scrollC.y = this.viewportTop - this.scrollY;
+  }
+
   // ---------------------------------------------------------------- input ----
   private setupKeyboard(): void {
     const kb = this.input.keyboard;
@@ -146,14 +357,14 @@ export class TitleScene extends Phaser.Scene {
     kb.on("keydown", (e: KeyboardEvent) => {
       if (this.mode === "menu") {
         if (e.key === "Enter" || e.key === " ") this.startGame();
+        else if (e.key === "ArrowDown") this.nudgeScroll(this.stepSize() * 0.5);
+        else if (e.key === "ArrowUp") this.nudgeScroll(-this.stepSize() * 0.5);
         return;
       }
       // entry mode
       if (e.key === "Enter") {
         this.confirmEntry();
-      } else if (e.key === "Backspace") {
-        this.slot = Math.max(0, this.slot - 1);
-      } else if (e.key === "ArrowLeft") {
+      } else if (e.key === "Backspace" || e.key === "ArrowLeft") {
         this.slot = Math.max(0, this.slot - 1);
       } else if (e.key === "ArrowRight") {
         this.slot = Math.min(2, this.slot + 1);
@@ -168,28 +379,61 @@ export class TitleScene extends Phaser.Scene {
     });
   }
 
+  private nudgeScroll(dy: number): void {
+    this.scrollY = Phaser.Math.Clamp(this.scrollY + dy, 0, this.maxScroll);
+    this.userUntil = this.clock + RESUME_AFTER;
+  }
+
   private cycleSlot(slot: number, dir: number): void {
     const code = this.initials[slot].charCodeAt(0) - 65; // A=0
     const next = (code + dir + 26) % 26;
     this.initials[slot] = String.fromCharCode(65 + next);
   }
 
-  private onTap(p: Phaser.Input.Pointer): void {
-    if (this.mode === "menu") {
-      if (this.playBtn && this.playBtn.contains(p.x, p.y)) this.startGame();
-      return;
-    }
-    if (this.okBtn && this.okBtn.contains(p.x, p.y)) {
-      this.confirmEntry();
-      return;
-    }
-    for (const a of this.arrowBtns) {
-      if (a.rect.contains(p.x, p.y)) {
-        this.slot = a.slot;
-        this.cycleSlot(a.slot, a.dir);
+  private onDown(p: Phaser.Input.Pointer): void {
+    if (this.mode === "entry") {
+      if (this.okBtn && this.okBtn.contains(p.x, p.y)) {
+        this.confirmEntry();
         return;
       }
+      for (const a of this.arrowBtns) {
+        if (a.rect.contains(p.x, p.y)) {
+          this.slot = a.slot;
+          this.cycleSlot(a.slot, a.dir);
+          return;
+        }
+      }
+      return;
     }
+    // menu: start a potential drag or PLAY press
+    this.pressingPlay = this.playBtn?.contains(p.x, p.y) ?? false;
+    this.dragMoved = false;
+    this.dragging = false;
+    this.dragStartY = p.y;
+    this.dragStartScroll = this.scrollY;
+  }
+
+  private onMove(p: Phaser.Input.Pointer): void {
+    if (this.mode !== "menu" || this.dragStartY === null || !p.isDown) return;
+    const dy = p.y - this.dragStartY;
+    if (!this.dragMoved && Math.abs(dy) > 6) {
+      this.dragMoved = true;
+      // only drag-scroll if the gesture began inside the viewport band
+      this.dragging = this.dragStartY >= this.viewportTop && this.dragStartY <= this.viewportTop + this.viewportH;
+    }
+    if (this.dragging) {
+      this.scrollY = Phaser.Math.Clamp(this.dragStartScroll - dy, 0, this.maxScroll);
+      this.userUntil = this.clock + RESUME_AFTER;
+    }
+  }
+
+  private onUp(p: Phaser.Input.Pointer): void {
+    if (this.mode !== "menu") return;
+    if (this.pressingPlay && !this.dragMoved && this.playBtn?.contains(p.x, p.y)) this.startGame();
+    if (this.dragMoved) this.userUntil = this.clock + RESUME_AFTER; // give a flick time to settle
+    this.dragging = false;
+    this.dragStartY = null;
+    this.pressingPlay = false;
   }
 
   private confirmEntry(): void {
@@ -197,6 +441,7 @@ export class TitleScene extends Phaser.Scene {
     this.scores = addScore(name, this.pendingScore, this.pendingLevel);
     this.newRank = this.scores.findIndex((h) => h.name === name && h.score === this.pendingScore);
     this.mode = "menu";
+    this.buildScroll(); // now show the table (with the new entry) in the scroller
   }
 
   private startGame(): void {
@@ -212,19 +457,22 @@ export class TitleScene extends Phaser.Scene {
     this.arrowBtns = [];
 
     this.drawBackground(d);
-    if (this.mode === "menu") this.drawMenu();
-    else this.drawEntry();
+    if (this.mode === "menu") {
+      this.updateScroll(dMs);
+      this.drawMenuChrome();
+    } else {
+      this.drawEntry();
+    }
     this.drawScanlines();
   }
 
   private drawBackground(d: number): void {
     const g = this.bg;
     const H = this.viewH;
-    // perspective neon grid creeping upward (the Minter horizon)
     const t = this.clock / 1000;
     g.lineStyle(1, 0x16203a, 1);
     for (let i = 0; i < 16; i++) {
-      const y = ((i / 16 + (t * 0.06) % (1 / 16)) % 1) * H;
+      const y = ((i / 16 + ((t * 0.06) % (1 / 16))) % 1) * H;
       g.lineBetween(0, y, GAME_WIDTH, y);
     }
     for (let c = 0; c <= 8; c++) {
@@ -232,7 +480,6 @@ export class TitleScene extends Phaser.Scene {
       g.lineBetween(x, 0, x, H);
     }
 
-    // starfield
     for (const s of this.stars) {
       s.y += s.z * 40 * d;
       if (s.y > H) {
@@ -245,59 +492,120 @@ export class TitleScene extends Phaser.Scene {
       g.fillRect(s.x, s.y, r, r);
     }
 
-    // drifting neon fish + sewage blobs
     for (const f of this.drifters) {
       f.x += f.vx * d;
       if (f.vx > 0 && f.x > GAME_WIDTH + 50) Object.assign(f, this.spawnDrifter(f.fish));
       if (f.vx < 0 && f.x < -50) Object.assign(f, this.spawnDrifter(f.fish));
       const col = NEON[(f.hue + Math.floor(this.clock / 200)) % NEON.length];
-      if (f.fish) this.drawFish(g, f.x, f.y, f.size, f.vx < 0, col);
-      else this.drawBlob(g, f.x, f.y, f.size, col);
+      if (f.fish) this.drawFish(g, f.x, f.y, f.size, f.vx < 0, col, 0.4);
+      else this.drawBlob(g, f.x, f.y, f.size);
     }
   }
 
-  private drawFish(g: Phaser.GameObjects.Graphics, x: number, y: number, s: number, flip: boolean, col: number): void {
+  private drawFish(g: Phaser.GameObjects.Graphics, x: number, y: number, s: number, flip: boolean, col: number, alpha = 0.85): void {
     const dir = flip ? -1 : 1;
-    g.fillStyle(col, 0.85);
+    g.fillStyle(col, alpha);
     g.fillEllipse(x, y, s * 1.6, s);
-    // tail
     g.beginPath();
     g.moveTo(x - dir * s * 0.8, y);
     g.lineTo(x - dir * s * 1.5, y - s * 0.5);
     g.lineTo(x - dir * s * 1.5, y + s * 0.5);
     g.closePath();
     g.fillPath();
-    // eye
-    g.fillStyle(0x000000, 1);
+    g.fillStyle(0x000000, alpha);
     g.fillCircle(x + dir * s * 0.5, y - s * 0.1, s * 0.12);
   }
 
-  private drawBlob(g: Phaser.GameObjects.Graphics, x: number, y: number, s: number, _col: number): void {
-    g.fillStyle(0x6b5524, 0.6);
+  private drawBlob(g: Phaser.GameObjects.Graphics, x: number, y: number, s: number): void {
+    g.fillStyle(0x6b5524, 0.5);
     g.fillCircle(x, y, s * 0.7);
-    g.fillStyle(0x4a3a18, 0.6);
+    g.fillStyle(0x4a3a18, 0.5);
     g.fillCircle(x + s * 0.3, y - s * 0.2, s * 0.4);
+  }
+
+  /** Procedural icons for the few elements the game itself draws with Graphics (no asset):
+   *  a pipe glyph, the sewer outlet, a dynamite stick, and a spill gush. */
+  private drawProcIcon(g: Phaser.GameObjects.Graphics, kind: ProcKind, x: number, y: number, s: number, color: number): void {
+    const r = s / 2;
+    switch (kind) {
+      case "pipe": {
+        // a 4-way cross of grey tube, like the in-game pieces
+        const t = s * 0.34;
+        g.fillStyle(0x000000, 0.22);
+        g.fillRoundedRect(x - t / 2 + 1.5, y - r + 2, t, s, 4);
+        g.fillStyle(0x6b7280, 1);
+        g.fillRoundedRect(x - t / 2, y - r, t, s, 4); // vertical arm
+        g.fillRoundedRect(x - r, y - t / 2, s, t, 4); // horizontal arm
+        g.fillStyle(0x9aa2af, 1);
+        g.fillRect(x - t / 2 + 2, y - r, t * 0.3, s); // edge highlight
+        g.fillRect(x - r, y - t / 2 + 2, s, t * 0.3);
+        break;
+      }
+      case "source": {
+        // concentric sewer-pipe mouth (matches GameScene's source draw)
+        g.fillStyle(0x8b8f96, 1);
+        g.fillCircle(x, y, r);
+        g.fillStyle(0x6b7077, 1);
+        g.fillCircle(x, y, r * 0.82);
+        g.fillStyle(0x33373d, 1);
+        g.fillCircle(x, y, r * 0.66);
+        g.fillStyle(0x14171b, 1);
+        g.fillCircle(x, y, r * 0.5);
+        g.fillStyle(0x7a6a2e, 1);
+        g.fillCircle(x, y + r * 0.12, r * 0.4); // sewage welling up
+        break;
+      }
+      case "dynamite": {
+        const u = s * 1.15;
+        g.fillStyle(0xc0392b, 1);
+        g.fillRoundedRect(x - u * 0.12, y - u * 0.22, u * 0.24, u * 0.44, 4);
+        g.fillStyle(0x000000, 0.18);
+        g.fillRect(x - u * 0.12, y - u * 0.02, u * 0.24, u * 0.05);
+        g.fillStyle(0xe8c07a, 1);
+        g.fillRect(x - u * 0.06, y - u * 0.13, u * 0.12, u * 0.09);
+        const ex = x + u * 0.15;
+        const ey = y - u * 0.32;
+        g.lineStyle(2, 0x3a3a3a, 1);
+        g.lineBetween(x, y - u * 0.22, ex, ey);
+        g.fillStyle(0xffd24a, 1);
+        g.fillCircle(ex, ey, 3.5);
+        g.fillStyle(0xff7a1a, 0.85);
+        g.fillCircle(ex, ey, 2);
+        break;
+      }
+      case "spill": {
+        g.fillStyle(0x3a3f47, 1);
+        g.fillRoundedRect(x - r * 0.95, y - r * 0.45, r * 0.7, r * 0.9, 3); // broken pipe end
+        g.fillStyle(color, 0.95);
+        for (let i = 0; i < 6; i++) {
+          const tt = i / 5;
+          g.fillCircle(x - r * 0.15 + tt * r * 1.05, y - r * 0.35 + Math.sin(tt * 3) * r * 0.3 + tt * r * 0.5, r * 0.15);
+        }
+        break;
+      }
+    }
   }
 
   private drawScanlines(): void {
     const g = this.ui;
     g.fillStyle(0x000000, 0.16);
     for (let y = 0; y < this.viewH; y += 4) g.fillRect(0, y, GAME_WIDTH, 2);
-    // vignette frame
     g.lineStyle(3, 0x00f6ff, 0.25);
     g.strokeRect(4, 4, GAME_WIDTH - 8, this.viewH - 8);
+    // soft fades at the viewport edges so scrolling text dissolves rather than clips hard
+    if (this.mode === "menu" && this.scrollC) {
+      const fade = 18;
+      g.fillStyle(0x000000, 0.55);
+      g.fillRect(0, this.viewportTop, GAME_WIDTH, fade);
+      g.fillRect(0, this.viewportTop + this.viewportH - fade, GAME_WIDTH, fade);
+    }
   }
 
-  private hide(...keys: string[]): void {
-    for (const k of keys) this.texts[k]?.setVisible(false);
-  }
-
-  private drawMenu(): void {
+  private drawMenuChrome(): void {
     const cx = GAME_WIDTH / 2;
     const H = this.viewH;
-    this.hide("entryHead", "entrySub", "initials", "okLabel");
 
-    // --- pulsing chromatic title ---
+    // pulsing chromatic title
     const pulse = 1 + Math.sin(this.clock / 320) * 0.05;
     const ty = Math.min(96, H * 0.1);
     const wob = Math.sin(this.clock / 500) * 4;
@@ -309,58 +617,14 @@ export class TitleScene extends Phaser.Scene {
     this.titleLayers.forEach((tl, i) => {
       tl.setVisible(true).setScale(pulse).setPosition(cx + offsets[i].dx, ty + offsets[i].dy);
     });
-
     this.show("tagline", cx, ty + 52, "STOP THE SEWAGE - SAVE THE FISH");
 
-    // --- how to play ---
-    let y = ty + 96;
-    this.show("howHead", cx, y, "HOW TO PLAY");
-    y += 30;
-    this.show("doHead", cx, y, "DO");
-    y += 22;
-    this.show(
-      "doBody",
-      cx,
-      y,
-      "LAY PIPE TO GUIDE THE SEWAGE DOWN\nCONTAIN THE DUMP TO WIN THE LEVEL\nGRAB STAR + FIST POWER TILES",
-    );
-    y += 64;
-    this.show("avoidHead", cx, y, "AVOID");
-    y += 22;
-    this.show(
-      "avoidBody",
-      cx,
-      y,
-      "SPILLS - OPEN ENDS LEAK FILTH\nCLOGS - WIPES, BUDS (DUMP OFF-PATH)\nDIVIDEND + POISON TILES",
-    );
-
-    // --- high score table ---
-    y += 70;
-    this.show("scoreHead", cx, y, "HIGH SCORES");
-    y += 30;
-    const rows = this.scores
-      .map((h, i) => {
-        const rank = String(i + 1).padStart(2, " ");
-        const name = h.name.padEnd(3, " ");
-        const sc = String(h.score).padStart(6, " ");
-        const mark = i === this.newRank ? " <" : "";
-        return `${rank} ${name} ${sc}  L${h.level}${mark}`;
-      })
-      .join("\n");
-    this.texts["scoreBody"]
-      .setVisible(true)
-      .setAlign("left")
-      .setOrigin(0.5, 0)
-      .setPosition(cx, y)
-      .setText(rows);
-    // flash the freshly-set entry
-    if (this.newRank >= 0) {
-      this.texts["scoreBody"].setColor(Math.floor(this.clock / 250) % 2 ? "#fff200" : "#e8e2d4");
-    } else {
-      this.texts["scoreBody"].setColor("#e8e2d4");
+    // flash the freshly-set high-score row
+    if (this.scoreText) {
+      this.scoreText.setColor(this.newRank >= 0 && Math.floor(this.clock / 250) % 2 ? "#fff200" : "#e8e2d4");
     }
 
-    // --- PLAY button (bottom-anchored, throbbing) ---
+    // PLAY button (bottom-anchored, throbbing)
     const bw = 240;
     const bh = 60;
     const bx = cx - bw / 2;
@@ -368,27 +632,16 @@ export class TitleScene extends Phaser.Scene {
     drawFlashButton(this.ui, this.clock, bx, by, bw, bh);
     this.playBtn = new Phaser.Geom.Rectangle(bx - 4, by - 4, bw + 8, bh + 8);
     this.texts["playLabel"].setVisible(true).setPosition(cx, by + bh / 2).setText("PLAY");
-
-    this.show("hint", cx, by - 20, "TAP PLAY OR PRESS ENTER");
+    this.show("hint", cx, by - 20, "TAP PLAY  -  SWIPE TO BROWSE");
   }
 
   private drawEntry(): void {
     const cx = GAME_WIDTH / 2;
     const H = this.viewH;
-    this.hide(
-      "tagline",
-      "howHead",
-      "doHead",
-      "doBody",
-      "avoidHead",
-      "avoidBody",
-      "scoreHead",
-      "scoreBody",
-      "playLabel",
-    );
+    this.texts["tagline"].setVisible(false);
+    this.texts["playLabel"].setVisible(false);
     this.playBtn = null;
 
-    // small pulsing title up top
     const pulse = 1 + Math.sin(this.clock / 320) * 0.05;
     const ty = Math.min(80, H * 0.09);
     this.titleLayers.forEach((tl, i) => {
@@ -399,7 +652,6 @@ export class TitleScene extends Phaser.Scene {
     this.show("entryHead", cx, midY - 90, "NEW HIGH SCORE!");
     this.show("entrySub", cx, midY - 56, `${this.pendingScore} PTS  -  REACHED LEVEL ${this.pendingLevel}`);
 
-    // three glowing initial slots with up/down arrows
     const slotW = 70;
     const gap = 26;
     const totalW = slotW * 3 + gap * 2;
@@ -413,20 +665,17 @@ export class TitleScene extends Phaser.Scene {
       this.ui.lineStyle(3, boxCol, 1);
       this.ui.strokeRoundedRect(sx, midY - 36, slotW, 72, 10);
 
-      // letter
       const lt = this.slotText(i);
       lt.setVisible(true).setPosition(sx + slotW / 2, midY).setText(this.initials[i]);
 
-      // arrows (graphics triangles) + hit rects
       const ax = sx + slotW / 2;
       this.ui.fillStyle(0x39ff14, active ? 1 : 0.5);
-      this.ui.fillTriangle(ax - 12, midY - 50, ax + 12, midY - 50, ax, midY - 64); // up
-      this.ui.fillTriangle(ax - 12, midY + 50, ax + 12, midY + 50, ax, midY + 64); // down
+      this.ui.fillTriangle(ax - 12, midY - 50, ax + 12, midY - 50, ax, midY - 64);
+      this.ui.fillTriangle(ax - 12, midY + 50, ax + 12, midY + 50, ax, midY + 64);
       this.arrowBtns.push({ rect: new Phaser.Geom.Rectangle(sx, midY - 70, slotW, 30), slot: i, dir: 1 });
       this.arrowBtns.push({ rect: new Phaser.Geom.Rectangle(sx, midY + 40, slotW, 30), slot: i, dir: -1 });
     }
 
-    // OK button
     const bw = 200;
     const bh = 54;
     const bx = cx - bw / 2;
@@ -434,11 +683,9 @@ export class TitleScene extends Phaser.Scene {
     drawFlashButton(this.ui, this.clock, bx, by, bw, bh);
     this.okBtn = new Phaser.Geom.Rectangle(bx, by, bw, bh);
     this.texts["okLabel"].setVisible(true).setPosition(cx, by + bh / 2).setText("ENTER");
-
     this.show("hint", cx, by + bh + 26, "ARROWS / TYPE  -  ENTER TO CONFIRM");
   }
 
-  // reuse the three initials text objects by index (created lazily as initials slots)
   private slotText(i: number): Phaser.GameObjects.Text {
     const key = `slot${i}`;
     if (!this.texts[key]) {

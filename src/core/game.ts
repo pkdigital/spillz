@@ -33,7 +33,7 @@ const PIECE_FOR_OPENINGS: Record<number, PieceType> = {
 // ---- Tunables (all the feel knobs live here) -------------------------------
 export const CONFIG = {
   rows: 10, // visible viewport rows (the world is infinite downward via scroll)
-  cols: 6, // narrowed by one to free a slim left strip for the queue + gauge (the canvas stays wide)
+  cols: 7, // odd, so sourceCol (3) is dead-centre; the queue/gauge now OVERLAY the board, not reserve a column
   queueLength: 5,
   /** Lead time before the spill starts oozing — long enough for a "SPILL STARTING 3..2..1" beat. */
   countdownMs: 3000,
