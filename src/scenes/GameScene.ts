@@ -3,6 +3,8 @@ import lottie, { type AnimationItem } from "lottie-web/build/player/lottie_light
 import tankerLottie from "./tanker-lottie.json";
 import factsData from "../../data/facts.json";
 import { CONFIG, Game } from "../core/game";
+import { qualifies } from "../core/highscores";
+import { drawFlashButton } from "./ui";
 import { PIECE_OPENINGS, sidesOf, JUNK_TYPES } from "../core/pieces";
 import {
   Side,
@@ -16,13 +18,14 @@ import {
 } from "../core/types";
 
 const CELL = 80;
-const QUEUE_H = 66; // dedicated horizontal queue/HUD band — now at the TOP, above the grid
-const HUD_H = QUEUE_H; // the grid starts below the top band
+const SIDEBAR_W = 80; // slim LEFT sidebar (vertical queue + gauge); the grid sits to its right
+const GRID_X = SIDEBAR_W; // grid x-offset (cols are shifted right by the sidebar)
+const HUD_H = 0; // grid starts at the top; the queue band is the left sidebar now
 const POND_H = 100;
 
 const ARCADE_FONT = "'Press Start 2P', monospace";
 
-export const GAME_WIDTH = CONFIG.cols * CELL;
+export const GAME_WIDTH = SIDEBAR_W + CONFIG.cols * CELL;
 export const GAME_HEIGHT = HUD_H + CONFIG.rows * CELL + POND_H;
 
 const COLORS = {
@@ -238,6 +241,12 @@ export class GameScene extends Phaser.Scene {
   private prevState: GameState = "COUNTDOWN";
   /** Pending (re)start — deferred out of the input callback to the next tick. */
   private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[] } | null = null;
+  /** Pending return to the title screen (run ended) — deferred out of the input callback. */
+  private pendingMenu: { pendingScore: number; pendingLevel: number } | null = null;
+  /** Player paused the run ("P"); the sim freezes and a RESUME overlay shows. */
+  private paused = false;
+  /** RESUME button hit rect while paused (null otherwise). */
+  private pauseButton: { x: number; y: number; w: number; h: number } | null = null;
   /** Smoothed X of the next-pipe box — slides right when the action is behind it. */
   /** Active dynamite blasts (world row/col so they scroll with the grid). */
   private explosions: { row: number; col: number; start: number; seed: number }[] = [];
@@ -359,6 +368,9 @@ export class GameScene extends Phaser.Scene {
     this.placedAnim.clear();
     this.prevState = "COUNTDOWN";
     this.pendingRestart = null;
+    this.pendingMenu = null;
+    this.paused = false;
+    this.pauseButton = null;
     this.explosions = [];
     this.blastBits = [];
     this.smokePuffs = [];
@@ -393,9 +405,9 @@ export class GameScene extends Phaser.Scene {
       this.lottiePlaying = false;
     });
 
-    // level indicator — a top-right overlay (no black HUD box anymore)
+    // SCORE — overlaid at the top of the grid (the queue band is the left sidebar now)
     this.statusText = this.add
-      .text(12, QUEUE_H / 2, "", {
+      .text(GRID_X + 10, 8, "", {
         fontFamily: ARCADE_FONT,
         fontSize: "13px",
         color: COLORS.text,
@@ -403,7 +415,7 @@ export class GameScene extends Phaser.Scene {
         stroke: "#06101a",
         strokeThickness: 4,
       })
-      .setOrigin(0, 0.5) // left, vertically centred in the top band
+      .setOrigin(0, 0)
       .setDepth(Z_TEXT);
     this.centerText = this.add
       .text(GAME_WIDTH / 2, (CONFIG.rows * CELL) / 2, "", {
@@ -487,7 +499,12 @@ export class GameScene extends Phaser.Scene {
     this.input.on("pointerdown", this.onDown, this);
     this.input.on("pointermove", this.onMove, this);
     this.input.on("pointerup", this.onUp, this);
-    // dev shortcuts: N = next level; D = kill a fish; P = fire the next power (cycles)
+    // player keys: Q = quit to title, P = pause/resume, Enter/Space = the shown button
+    this.input.keyboard?.on("keydown-Q", () => this.quitToTitle());
+    this.input.keyboard?.on("keydown-P", () => this.togglePause());
+    this.input.keyboard?.on("keydown-ENTER", () => this.activatePrimaryButton());
+    this.input.keyboard?.on("keydown-SPACE", () => this.activatePrimaryButton());
+    // dev shortcuts: N = next level; D = kill a fish; F = fire the next power (cycles)
     this.input.keyboard?.on("keydown-N", () => {
       this.pendingRestart = {
         level: this.model.level + 1,
@@ -497,12 +514,53 @@ export class GameScene extends Phaser.Scene {
       };
     });
     this.input.keyboard?.on("keydown-D", () => this.model.killFish());
-    this.input.keyboard?.on("keydown-P", () => {
+    this.input.keyboard?.on("keydown-F", () => {
       const cycle: PowerType[] = ["score", "freeze", "poison", "rain", "blitz", "speed-up"];
       const power = cycle[this.devPowerIdx % cycle.length];
       this.devPowerIdx++;
       this.model.devFirePower(power);
     });
+  }
+
+  /** Point-in-rect test for the modal buttons. */
+  private hit(b: { x: number; y: number; w: number; h: number } | null, x: number, y: number): boolean {
+    return !!b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+  }
+
+  /** Fire whichever modal button is currently shown — shared by taps and the Enter key. */
+  private activatePrimaryButton(): void {
+    if (this.paused) {
+      this.paused = false;
+    } else if (!this.model.started) {
+      this.unlockAudio();
+      this.model.beginRun();
+    } else if (this.model.state === "WON") {
+      this.advanceLevel();
+    } else if (this.model.state === "GAMEOVER") {
+      this.quitToTitle();
+    }
+  }
+
+  /** Advance to the next level, carrying the score + seen hints forward. */
+  private advanceLevel(): void {
+    this.pendingRestart = {
+      level: this.model.level + 1,
+      fishSaved: this.model.fishSaved,
+      runScore: this.model.runScore,
+      seenHints: [...this.seenHints],
+    };
+  }
+
+  /** Quit the current run back to the title (the score rides along for the table). */
+  private quitToTitle(): void {
+    this.paused = false;
+    this.pendingMenu = { pendingScore: this.model.runScore, pendingLevel: this.model.level };
+  }
+
+  /** Toggle pause — only meaningful while a run is actually in progress. */
+  private togglePause(): void {
+    if (!this.model.started || this.model.state === "WON" || this.model.state === "GAMEOVER") return;
+    this.paused = !this.paused;
   }
 
   /** Lazily create + unlock the WebAudio context on the first user gesture. */
@@ -630,26 +688,22 @@ export class GameScene extends Phaser.Scene {
     this.dragging = false;
     if (wasDrag) return; // it was a scroll, not a placement
 
+    // Paused: the board is frozen — only the RESUME button responds.
+    if (this.paused) {
+      if (this.hit(this.pauseButton, p.x, p.y)) this.activatePrimaryButton();
+      return;
+    }
+
     // Pre-run Start screen: only the Start button does anything.
     if (!this.model.started) {
-      const b = this.startButton;
-      if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
-        this.unlockAudio();
-        this.model.beginRun();
-      }
+      if (this.hit(this.startButton, p.x, p.y)) this.activatePrimaryButton();
       return;
     }
 
     // Defer scene restarts to the next update tick (restarting inside an input
     // callback can leave the scene half-torn-down -> blank screen).
     if (this.model.state === "WON" || this.model.state === "GAMEOVER") {
-      const b = this.endButton; // only the dialog button advances
-      if (b && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
-        const level = this.model.state === "WON" ? this.model.level + 1 : this.model.level;
-        // a WON advance keeps the seen hints; a GAMEOVER ends the run, so start hints fresh
-        const seenHints = this.model.state === "WON" ? [...this.seenHints] : [];
-        this.pendingRestart = { level, fishSaved: this.model.fishSaved, runScore: this.model.runScore, seenHints };
-      }
+      if (this.hit(this.endButton, p.x, p.y)) this.activatePrimaryButton();
       return;
     }
     // No placing until the board-reveal has settled — the game proper starts after the reel.
@@ -669,8 +723,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private toCell(x: number, y: number): Coord | null {
-    if (y < HUD_H || y > this.gridBottom) return null; // taps in the top band / pond aren't grid cells
-    const col = Math.floor(x / CELL);
+    if (x < GRID_X || y < HUD_H || y > this.gridBottom) return null; // taps in the sidebar / pond aren't cells
+    const col = Math.floor((x - GRID_X) / CELL);
     const row = Math.floor((y - HUD_H + this.scrollPx) / CELL);
     const coord = { row, col };
     return this.model.grid.inBounds(coord) ? coord : null;
@@ -678,6 +732,11 @@ export class GameScene extends Phaser.Scene {
 
   private rowScreenY(row: number): number {
     return HUD_H + row * CELL - this.scrollPx;
+  }
+
+  /** Screen X of a column's left edge (the grid is shifted right by the left sidebar). */
+  private colX(col: number): number {
+    return GRID_X + col * CELL;
   }
 
   // ---- responsive layout (canvas height matches the device, pond pinned to bottom) ----
@@ -705,8 +764,17 @@ export class GameScene extends Phaser.Scene {
       this.scene.restart(data);
       return;
     }
+    // run ended -> hand the final score to the title screen (initials entry + table)
+    if (this.pendingMenu) {
+      const data = this.pendingMenu;
+      this.pendingMenu = null;
+      this.scene.start("TitleScene", data);
+      return;
+    }
 
-    this.clock += deltaMs;
+    this.clock += deltaMs; // UI clock always ticks (overlays/buttons keep animating while paused)
+    // While paused the simulation gets zero elapsed time — everything freezes in place.
+    const simDt = this.paused ? 0 : deltaMs;
     // Advance the flow-texture phase at exactly the speed the sewage front moves (one CELL
     // per ring). Accumulated (not clock×rate) so a rate change — superflow, speed powers —
     // changes future drift without teleporting every speck.
@@ -715,11 +783,11 @@ export class GameScene extends Phaser.Scene {
       // contained! the held sewage eases to a stop instead of freezing dead (it's NOT drained)
       flowRate *= Math.max(0, 1 - (this.clock - this.winDrainStart) / WIN_DRAIN_MS);
     }
-    if (!this.model.frozen) this.flowPhase += deltaMs * flowRate;
+    if (!this.model.frozen) this.flowPhase += simDt * flowRate;
     // Hold the countdown while the board is still revealing (obstacles reeling in). The reveal is
     // a pure scene animation; the game proper only begins once every tile has settled.
     const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
-    this.model.update(revealing ? 0 : deltaMs);
+    this.model.update(revealing ? 0 : simDt);
 
     // level cleared: fanfare + green flash. The tanker then drives in and the pipes drain into it.
     if (this.model.state === "WON" && this.prevState !== "WON") {
@@ -746,9 +814,9 @@ export class GameScene extends Phaser.Scene {
     this.prevContained = m.overflowContained;
     this.prevLeaking = m.leaking;
 
-    this.updateCamera(deltaMs);
-    this.updateDrips(deltaMs);
-    this.updateBlast(deltaMs);
+    this.updateCamera(simDt);
+    this.updateDrips(simDt);
+    this.updateBlast(simDt);
 
     // each special tile the sewage hits: clogs tumble into the pond; newest pops a toast
     // message popups are disabled for now — keep only the physical effects
@@ -784,7 +852,7 @@ export class GameScene extends Phaser.Scene {
   /** A flowed-through unflushable tumbles out of its tile and falls into the pond. */
   private spawnJunkDrop(e: FlowEvent): void {
     if (this.junkDrops.length > 40) return;
-    const x = e.coord.col * CELL + CELL / 2;
+    const x = this.colX(e.coord.col) + CELL / 2;
     const y = Math.max(HUD_H, this.rowScreenY(e.coord.row) + CELL / 2);
     this.junkDrops.push({
       x,
@@ -851,7 +919,7 @@ export class GameScene extends Phaser.Scene {
           if (this.drips.length >= DRIP_MAX) break;
           const [ux, uy] = GameScene.ARROW_VEC[leak.out];
           // spawn at the pipe MOUTH (cell edge in the spill direction), not the cell centre
-          const mx = leak.from.col * CELL + CELL / 2 + ux * CELL * 0.5;
+          const mx = this.colX(leak.from.col) + CELL / 2 + ux * CELL * 0.5;
           const my = this.rowScreenY(leak.from.row) + CELL / 2 + uy * CELL * 0.5;
           if (my < HUD_H - CELL) continue; // leak off the top of the view
           this.drips.push({
@@ -872,14 +940,12 @@ export class GameScene extends Phaser.Scene {
     // While the player is peeking (drag-to-scroll), leave the camera where they put
     // it; otherwise deadzone-follow the latest placement and drift back smoothly.
     if (this.clock >= this.manualScrollUntil) {
+      const margin = FOLLOW_BOTTOM_MARGIN;
       const focusViewRow = this.model.buildRow - this.scrollPx / CELL;
-      // keep the build front in the UPPER portion, near the top queue band (less eye travel),
-      // while still showing empty rows below to build into.
-      const lowBound = Math.max(FOLLOW_BOTTOM_MARGIN, Math.round(this.visRows * 0.45));
-      if (focusViewRow > lowBound) {
-        this.scrollTargetPx = (this.model.buildRow - lowBound) * CELL;
-      } else if (focusViewRow < FOLLOW_BOTTOM_MARGIN) {
-        this.scrollTargetPx = (this.model.buildRow - FOLLOW_BOTTOM_MARGIN) * CELL;
+      if (focusViewRow > this.visRows - margin) {
+        this.scrollTargetPx = (this.model.buildRow - (this.visRows - margin)) * CELL;
+      } else if (focusViewRow < margin) {
+        this.scrollTargetPx = (this.model.buildRow - margin) * CELL;
       }
       this.scrollTargetPx = Math.max(0, this.scrollTargetPx);
       const k = Math.min(1, deltaMs / SCROLL_SMOOTH_MS);
@@ -936,10 +1002,10 @@ export class GameScene extends Phaser.Scene {
       const y = this.rowScreenY(r);
       const surface = r < SURFACE_ROWS;
       w.fillStyle(surface ? COLORS.grassBase : COLORS.soilBase, 1);
-      w.fillRect(0, y, GAME_WIDTH, CELL);
+      w.fillRect(GRID_X, y, GAME_WIDTH - GRID_X, CELL); // ground spans the grid only (sidebar is left)
       this.drawGroundTexture(w, r, y, surface);
       for (let c = 0; c < CONFIG.cols; c++) {
-        const x = c * CELL;
+        const x = this.colX(c);
         if ((r + c) % 2 === 0) {
           w.fillStyle(0xffffff, 0.008); // barely-there chequerboard placement guide
           w.fillRect(x, y, CELL, CELL);
@@ -974,13 +1040,13 @@ export class GameScene extends Phaser.Scene {
       const sc = easeOutBack(ci); // scale-pop the boss in
       if (haveBergSprite) {
         if (isBerg(-1, 0) || isBerg(0, -1)) continue; // one sprite, drawn at the 2x2 anchor
-        const ccx = c.col * CELL + CELL; // centre of the 2x2 block
+        const ccx = this.colX(c.col) + CELL; // centre of the 2x2 block
         const ccy = this.rowScreenY(c.row) + CELL;
         w.fillStyle(0x000000, 0.16);
         w.fillEllipse(ccx, ccy + CELL * 0.85, CELL * 1.5 * sc, CELL * 0.3 * sc); // ground shadow
         this.useSprite("fatberg", ccx, ccy, CELL * 2.2 * sc, Z_GRID_SPRITE + 1);
       } else {
-        this.drawFatbergCell(w, c.col * CELL + CELL / 2, this.rowScreenY(c.row) + CELL / 2, c);
+        this.drawFatbergCell(w, this.colX(c.col) + CELL / 2, this.rowScreenY(c.row) + CELL / 2, c);
       }
     }
 
@@ -1000,7 +1066,7 @@ export class GameScene extends Phaser.Scene {
       if (seg.coord.row < topRow || seg.coord.row > botRow) continue;
       const cell = this.model.grid.get(seg.coord);
       if (!cell) continue;
-      const cx = seg.coord.col * CELL + CELL / 2;
+      const cx = this.colX(seg.coord.col) + CELL / 2;
       const cy = this.rowScreenY(seg.coord.row) + CELL / 2;
       if (seg.at === ringStart && progress < 1) {
         // leading tile: poo grows along the centre-line, nose-first (drawn directly, no mask)
@@ -1034,6 +1100,7 @@ export class GameScene extends Phaser.Scene {
     this.renderBanner(); // big instruction flash (hidden behind the end/start cards)
     this.renderEndDialog(u); // modal card, drawn on top of everything
     this.renderStartOverlay(u); // pre-run Start screen (mutually exclusive with the end card)
+    this.renderPauseOverlay(u); // PAUSED scrim (only mid-run; last so it sits on top)
 
     for (let i = this.spriteIdx; i < this.sprites.length; i++) this.sprites[i].setVisible(false);
     for (let i = this.labelIdx; i < this.labels.length; i++) this.labels[i].setVisible(false);
@@ -1239,7 +1306,7 @@ export class GameScene extends Phaser.Scene {
   private drawGroundTexture(g: G, r: number, y: number, surface: boolean): void {
     if (surface) {
       for (let i = 0; i < 26; i++) {
-        const bx = hash3(r, i, 1) * GAME_WIDTH;
+        const bx = GRID_X + hash3(r, i, 1) * (GAME_WIDTH - GRID_X);
         const h = 9 + hash3(r, i, 2) * 15;
         const baseY = y + CELL - 1;
         const sway = Math.sin(this.clock / 680 + bx * 0.045 + r) * (3 + h * 0.18);
@@ -1248,7 +1315,7 @@ export class GameScene extends Phaser.Scene {
       }
     } else {
       for (let i = 0; i < 13; i++) {
-        const dx = hash3(r, i, 1) * GAME_WIDTH;
+        const dx = GRID_X + hash3(r, i, 1) * (GAME_WIDTH - GRID_X);
         const dy = y + hash3(r, i, 2) * CELL;
         const sz = 2 + hash3(r, i, 3) * 3.5;
         g.fillStyle(hash3(r, i, 4) > 0.5 ? COLORS.soilSpeckle : COLORS.soilSpeckleLight, 0.55);
@@ -1291,7 +1358,7 @@ export class GameScene extends Phaser.Scene {
    *  of ember + muck debris, rising smoke, and a camera shake for the punch. */
   private spawnBlast(row: number, col: number): void {
     this.explosions.push({ row, col, start: this.clock, seed: Math.random() * 6.28 });
-    const x = col * CELL + CELL / 2;
+    const x = this.colX(col) + CELL / 2;
     const y = this.rowScreenY(row) + CELL / 2;
     for (let i = 0; i < 26; i++) {
       const ang = Math.random() * Math.PI * 2;
@@ -1363,7 +1430,7 @@ export class GameScene extends Phaser.Scene {
     this.explosions = this.explosions.filter((e) => this.clock - e.start < EXPLOSION_MS);
     for (const e of this.explosions) {
       const t = (this.clock - e.start) / EXPLOSION_MS; // 0..1
-      const x = e.col * CELL + CELL / 2;
+      const x = this.colX(e.col) + CELL / 2;
       const y = this.rowScreenY(e.row) + CELL / 2;
       // shockwave ring — fast, thinning, gone by mid-blast
       if (t < 0.6) {
@@ -1689,7 +1756,7 @@ export class GameScene extends Phaser.Scene {
     const frozen = this.model.frozen; // a freeze stops the leak gushing — it ices over at the mouth
     const stream = lerpColor(SEWAGE_YELLOW, SEWAGE_BROWN, 0.55);
     for (const leak of this.model.leaks) {
-      const cx = leak.from.col * CELL + CELL / 2;
+      const cx = this.colX(leak.from.col) + CELL / 2;
       const cy = this.rowScreenY(leak.from.row) + CELL / 2;
       if (cy < HUD_H - CELL) continue; // leak off the top of the view
       const [ux, uy] = GameScene.ARROW_VEC[leak.out];
@@ -1757,7 +1824,7 @@ export class GameScene extends Phaser.Scene {
       if (leakSet.has(`${t.row},${t.col}`)) continue;
       const y = this.rowScreenY(t.row);
       if (!onScreen(y)) continue;
-      this.marchArrows(t.col * CELL + CELL / 2, y + CELL / 2, dir);
+      this.marchArrows(this.colX(t.col) + CELL / 2, y + CELL / 2, dir);
     }
   }
 
@@ -1769,7 +1836,7 @@ export class GameScene extends Phaser.Scene {
     for (const { cell, dir } of this.model.leakHints) {
       const y = this.rowScreenY(cell.row);
       if (!onScreen(y)) continue;
-      this.marchArrows(cell.col * CELL + CELL / 2, y + CELL / 2, dir, 520, COLORS.dividend);
+      this.marchArrows(this.colX(cell.col) + CELL / 2, y + CELL / 2, dir, 520, COLORS.dividend);
     }
   }
 
@@ -1856,54 +1923,52 @@ export class GameScene extends Phaser.Scene {
     g.fillTriangle(x + r, y, x, y - w, x, y + w);
   }
 
-  /** The dedicated horizontal HUD BAND at the TOP: SCORE (left), the queue (current piece on the
-   *  right of its packed group), then the spill gauge (far right). Reserved space, above the grid. */
+  /** The dedicated vertical LEFT SIDEBAR: the current piece at the top, upcoming stacked below
+   *  (Tetris-style), sliding up into the active slot as you place. The gauge sits at the bottom. */
   private renderQueue(g: G): void {
     const m = this.model;
-    const bandTop = 0;
-    const cy = bandTop + QUEUE_H / 2;
-    // the band itself — a metal strip above the grid
+    const bandBot = this.pondTop;
+    // the sidebar itself — a metal strip down the left of the grid
     g.fillStyle(0x14161b, 1);
-    g.fillRect(0, bandTop, GAME_WIDTH, QUEUE_H);
+    g.fillRect(0, 0, SIDEBAR_W, bandBot);
     g.fillStyle(0x3a3f47, 1);
-    g.fillRect(0, bandTop, GAME_WIDTH, 3); // top rail
+    g.fillRect(SIDEBAR_W - 3, 0, 3, bandBot); // right rail
     g.fillStyle(0x07080a, 1);
-    g.fillRect(0, bandTop + QUEUE_H - 2, GAME_WIDTH, 2); // bottom shadow
+    g.fillRect(0, 0, 2, bandBot); // left shadow
 
     if (m.state === "WON" || m.state === "GAMEOVER" || !m.started) return;
     const front = m.currentPiece;
     if (front !== this.prevFront) {
-      this.slideOff = this.prevFront; // remember the piece leaving so it slides off the left
+      this.slideOff = this.prevFront; // remember the piece leaving so it slides off the top
       this.prevFront = front;
       this.rouletteStart = this.clock; // slide start
     }
     if (!front) return;
 
-    const tile = 38;
-    const step = tile + 6; // packed tightly together, not spread across the width
-    const gaugeLeft = GAME_WIDTH - 80; // the gauge sits on the right, clear of the queue
+    const tile = 56;
+    const step = tile + 8;
+    const cx = SIDEBAR_W / 2;
+    const topY = 56; // active slot, near the top (below the overlaid score)
     const n = m.queue.length;
-    const firstX = 150 + tile / 2; // start after the SCORE readout on the left
-    const lastX = firstX + (n - 1) * step; // the CURRENT piece's slot (right end of the packed group)
     const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
     const ee = 1 - Math.pow(1 - e, 3); // ease-out
 
-    // the active slot highlight (fixed on the RIGHT); pieces slide rightward into it as you place
-    this.drawItemBox(g, lastX, cy, tile + 8, 0.13);
+    // the active slot highlight (fixed at the top); pieces slide up into it as you place
+    this.drawItemBox(g, cx, topY, tile + 8, 0.13);
 
-    const drawTile = (px: number, qp: QueuePiece) => {
-      if (px < 4 || px > gaugeLeft - 4) return; // off the band / behind the gauge
-      this.drawPipeGlyph(g, px, cy, PIECE_OPENINGS[qp.type], tile * 0.78);
-      if (qp.dynamite) this.drawDynamiteBadge(g, px, cy, tile * 0.78);
+    const drawTile = (py: number, qp: QueuePiece) => {
+      if (py < topY - step || py > bandBot - tile / 2) return; // off the top / behind the gauge
+      this.drawPipeGlyph(g, cx, py, PIECE_OPENINGS[qp.type], tile * 0.78);
+      if (qp.dynamite) this.drawDynamiteBadge(g, cx, py, tile * 0.78);
     };
 
-    // current (queue[0]) sits at slot n-1 (right); upcoming fill leftward (next nearest the current)
+    // current (queue[0]) arrives at topY; upcoming descend below it
     for (let i = 0; i < n; i++) {
       const qp = m.queue[i];
       if (!qp) break;
-      drawTile(firstX + (n - 2 - i + ee) * step, qp);
+      drawTile(topY + (i + 1 - ee) * step, qp);
     }
-    if (this.slideOff && ee < 1) drawTile(firstX + (n - 1 + ee) * step, this.slideOff); // sliding off right
+    if (this.slideOff && ee < 1) drawTile(topY - ee * step, this.slideOff); // sliding off the top
   }
 
   /** A dynamite stick + spark overlaid on the next-piece box so a bomb reads as a bomb. */
@@ -1975,7 +2040,7 @@ export class GameScene extends Phaser.Scene {
     for (const s of this.blitzStrikes) {
       const age = this.clock - s.born;
       if (age < 0) continue; // staggered — not struck yet
-      const x = s.col * CELL + CELL / 2;
+      const x = this.colX(s.col) + CELL / 2;
       const y = this.rowScreenY(s.row) + CELL / 2;
       if (y < HUD_H - CELL || y > this.pondTop + CELL) continue;
       const t = age / 380;
@@ -2008,7 +2073,7 @@ export class GameScene extends Phaser.Scene {
 
   private spawnScorePop(coord: Coord, value: number): void {
     this.scorePops.push({
-      x: coord.col * CELL + CELL / 2,
+      x: this.colX(coord.col) + CELL / 2,
       y: this.rowScreenY(coord.row) + CELL / 2,
       value,
       born: this.clock,
@@ -2381,9 +2446,9 @@ export class GameScene extends Phaser.Scene {
    *  left. Both phases of "the spill clock" in one widget. */
   private renderGauge(g: G): void {
     const m = this.model;
-    const R = 34;
-    const gx = GAME_WIDTH - R - 12; // pivot: right side of the top band
-    const gy = QUEUE_H - 8; // flat side near the band bottom, arc reaching up
+    const R = 32;
+    const gx = SIDEBAR_W / 2; // centred in the left sidebar
+    const gy = this.pondTop - 16; // near the bottom of the sidebar, arc reaching up
 
     // target needle fraction (0 = SAFE/left, 1 = SPILL/right) + the centre number
     let target = 0;
@@ -2521,12 +2586,15 @@ export class GameScene extends Phaser.Scene {
     const hours = Math.max(1, Math.round(m.overflowTotal * 0.4));
     const litres = (hours * 140000).toLocaleString();
     const title = won ? "SPILL ENDED" : "RIVER OVERWHELMED";
+    // on a game over (run end), flag a high-score so the player knows the table awaits
+    const highScore = !won && qualifies(m.runScore);
     const report =
       `${title}\n\n` +
       `DURATION    ${hours} HOURS\n` +
       `DISCHARGED    ${litres} L\n` +
       `FISH LOST    ${m.fishDead}\n\n` +
-      `SCORE    ${m.runScore}`;
+      `SCORE    ${m.runScore}` +
+      (highScore ? `\n\nNEW HIGH SCORE!` : "");
     this.centerText.setPosition(GAME_WIDTH / 2, py + 190).setText(report);
 
     // the gut-punch: this was ONE spill vs the real annual scale
@@ -2539,12 +2607,12 @@ export class GameScene extends Phaser.Scene {
     const bh = 54;
     const bx = GAME_WIDTH / 2 - bw / 2;
     const by = py + ph - bh - 20;
-    g.fillStyle(accent, 0.95);
-    g.fillRoundedRect(bx, by, bw, bh, 12);
+    // the throbbing neon button, shared with the title screen's PLAY
+    drawFlashButton(g, this.clock, bx, by, bw, bh);
     this.endButton = { x: bx, y: by, w: bw, h: bh };
     this.buttonText
       .setPosition(GAME_WIDTH / 2, by + bh / 2)
-      .setText(won ? "NEXT LEVEL" : "TRY AGAIN")
+      .setText(won ? "NEXT LEVEL" : "CONTINUE")
       .setVisible(true);
   }
 
@@ -2586,10 +2654,35 @@ export class GameScene extends Phaser.Scene {
     const bh = 58;
     const bx = GAME_WIDTH / 2 - bw / 2;
     const by = py + ph - bh - 24;
-    g.fillStyle(COLORS.pondClean, 0.95);
-    g.fillRoundedRect(bx, by, bw, bh, 12);
+    // the throbbing neon button, shared with the title screen's PLAY
+    drawFlashButton(g, this.clock, bx, by, bw, bh);
     this.startButton = { x: bx, y: by, w: bw, h: bh };
     this.buttonText.setPosition(GAME_WIDTH / 2, by + bh / 2).setText("START").setVisible(true);
+  }
+
+  /** Mid-run PAUSED scrim: a frozen board behind a RESUME button (reuses the shared
+   *  throbbing-neon button); P resumes, Q quits. Only drawn while this.paused. */
+  private renderPauseOverlay(g: G): void {
+    if (!this.paused) {
+      this.pauseButton = null;
+      return;
+    }
+    g.fillStyle(0x05070c, 0.72);
+    g.fillRect(0, 0, GAME_WIDTH, this.viewH);
+
+    const cx = GAME_WIDTH / 2;
+    const cy = this.viewH / 2;
+    this.centerText.setPosition(cx, cy - 72).setText("PAUSED").setVisible(true);
+
+    const bw = 240;
+    const bh = 56;
+    const bx = cx - bw / 2;
+    const by = cy - bh / 2 + 6;
+    drawFlashButton(g, this.clock, bx, by, bw, bh);
+    this.pauseButton = { x: bx, y: by, w: bw, h: bh };
+    this.buttonText.setPosition(cx, by + bh / 2).setText("RESUME").setVisible(true);
+
+    this.compareText.setPosition(cx, by + bh + 30).setText("P RESUME   -   Q QUIT").setVisible(true);
   }
 
 }

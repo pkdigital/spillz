@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { GameScene, GAME_WIDTH, GAME_HEIGHT } from "./scenes/GameScene";
+import { TitleScene } from "./scenes/TitleScene";
 
 // Size the canvas to the device's aspect ratio so FIT doesn't pad it with black
 // letterbox bars on tall phones. Width stays fixed (the 7 columns); the extra
@@ -19,7 +20,7 @@ const game = new Phaser.Game({
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,
   },
-  scene: [GameScene],
+  scene: [TitleScene, GameScene],
 });
 
 window.addEventListener("resize", () => game.scale.setGameSize(GAME_WIDTH, fitHeight()));
