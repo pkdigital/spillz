@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CONFIG, Game } from "../src/core/game";
 
-CONFIG.flowJitter = 0; // deterministic flow timing for these tests (production wobbles it)
+(CONFIG as { flowJitter: number }).flowJitter = 0; // deterministic flow timing (production wobbles it)
 
 /** Lay a pipe under the toilet (starts the run) and run out the countdown. */
 function start(g: Game): void {
