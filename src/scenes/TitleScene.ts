@@ -619,37 +619,53 @@ export class TitleScene extends Phaser.Scene {
     });
 
     const midY = H * 0.42;
-    this.show("entryHead", cx, midY - 90, "NEW HIGH SCORE!");
-    this.show("entrySub", cx, midY - 56, `${this.pendingScore} PTS  -  REACHED LEVEL ${this.pendingLevel}`);
+    this.show("entryHead", cx, midY - 150, "NEW HIGH SCORE!");
+    this.show("entrySub", cx, midY - 120, `${this.pendingScore} PTS  -  REACHED LEVEL ${this.pendingLevel}`);
 
-    const slotW = 70;
-    const gap = 26;
+    const slotW = 80;
+    const gap = 18;
     const totalW = slotW * 3 + gap * 2;
     const startX = cx - totalW / 2;
+    const btnH = 58; // big, finger-friendly up/down buttons
+    const boxH = 76;
+    const upTop = midY - boxH / 2 - 10 - btnH;
+    const downTop = midY + boxH / 2 + 10;
     for (let i = 0; i < 3; i++) {
       const sx = startX + i * (slotW + gap);
       const active = i === this.slot;
       const boxCol = active ? NEON[Math.floor(this.clock / 250) % NEON.length] : 0x16203a;
+
+      // big up/down buttons (chunky, with their own backgrounds + arrows + tap rects)
+      const arrowBtn = (top: number, dir: number) => {
+        this.ui.fillStyle(0x14202c, 0.95);
+        this.ui.fillRoundedRect(sx, top, slotW, btnH, 10);
+        this.ui.lineStyle(2, 0x39ff14, active ? 0.95 : 0.55);
+        this.ui.strokeRoundedRect(sx, top, slotW, btnH, 10);
+        const ax = sx + slotW / 2;
+        const ay = top + btnH / 2;
+        const tw = 18;
+        this.ui.fillStyle(0x39ff14, active ? 1 : 0.6);
+        if (dir > 0) this.ui.fillTriangle(ax - tw, ay + 8, ax + tw, ay + 8, ax, ay - 10);
+        else this.ui.fillTriangle(ax - tw, ay - 8, ax + tw, ay - 8, ax, ay + 10);
+        this.arrowBtns.push({ rect: new Phaser.Geom.Rectangle(sx, top, slotW, btnH), slot: i, dir });
+      };
+      arrowBtn(upTop, 1);
+      arrowBtn(downTop, -1);
+
+      // the letter box
       this.ui.fillStyle(0x05070c, 1);
-      this.ui.fillRoundedRect(sx, midY - 36, slotW, 72, 10);
+      this.ui.fillRoundedRect(sx, midY - boxH / 2, slotW, boxH, 10);
       this.ui.lineStyle(3, boxCol, 1);
-      this.ui.strokeRoundedRect(sx, midY - 36, slotW, 72, 10);
+      this.ui.strokeRoundedRect(sx, midY - boxH / 2, slotW, boxH, 10);
 
       const lt = this.slotText(i);
       lt.setVisible(true).setPosition(sx + slotW / 2, midY).setText(this.initials[i]);
-
-      const ax = sx + slotW / 2;
-      this.ui.fillStyle(0x39ff14, active ? 1 : 0.5);
-      this.ui.fillTriangle(ax - 12, midY - 50, ax + 12, midY - 50, ax, midY - 64);
-      this.ui.fillTriangle(ax - 12, midY + 50, ax + 12, midY + 50, ax, midY + 64);
-      this.arrowBtns.push({ rect: new Phaser.Geom.Rectangle(sx, midY - 70, slotW, 30), slot: i, dir: 1 });
-      this.arrowBtns.push({ rect: new Phaser.Geom.Rectangle(sx, midY + 40, slotW, 30), slot: i, dir: -1 });
     }
 
-    const bw = 200;
-    const bh = 54;
+    const bw = 220;
+    const bh = 58;
     const bx = cx - bw / 2;
-    const by = midY + 110;
+    const by = midY + boxH / 2 + 10 + btnH + 26;
     drawFlashButton(this.ui, this.clock, bx, by, bw, bh);
     this.okBtn = new Phaser.Geom.Rectangle(bx, by, bw, bh);
     this.texts["okLabel"].setVisible(true).setPosition(cx, by + bh / 2).setText("ENTER");
