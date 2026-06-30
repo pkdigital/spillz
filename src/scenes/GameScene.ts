@@ -17,7 +17,7 @@ import {
 
 const CELL = 80;
 const GRID_X = 0; // the grid fills the whole canvas now (no reserved sidebar)
-const HUD_H = 0; // grid starts at the top
+const HUD_H = 40; // reserved top band for the score + poo-o-meter (the grid sits below it)
 const POND_H = 100;
 // The queue + gauge no longer reserve a column — they OVERLAY the left of the board
 // on a translucent layer so the board reclaims the full width.
@@ -2465,9 +2465,13 @@ export class GameScene extends Phaser.Scene {
       this.lastGaugeStep = lit;
     }
 
-    // --- the poo-o-meter: a poo icon at the top-left, then the LED strip filling the rest ---
+    // --- reserved top band: masks any grid content scrolled up into it, behind the score + meter ---
+    g.fillStyle(0x0c0b0a, 1);
+    g.fillRect(0, 0, GAME_WIDTH, HUD_H);
+
+    // --- the poo-o-meter: a poo icon then the LED strip, on the meter row of the band ---
     const h = 10;
-    const y = 22; // up at the top
+    const y = 24; // meter row (the score sits above it at y~8)
     const pad = 6;
     const pooSz = 26;
     this.useSprite("poo", pad + pooSz / 2, y + h / 2, pooSz, Z_UI_SPRITE); // the poo dial face
@@ -2527,7 +2531,7 @@ export class GameScene extends Phaser.Scene {
     // this level reframed as one real spill event
     const hours = Math.max(1, Math.round(m.overflowTotal * 0.4));
     const litres = (hours * 140000).toLocaleString();
-    const title = won ? "SPILL ENDED" : "RIVER OVERWHELMED";
+    const title = won ? "WELL DONE!" : "RIVER OVERWHELMED";
     // on a game over (run end), flag a high-score so the player knows the table awaits
     const highScore = !won && qualifies(m.runScore);
     const report =
