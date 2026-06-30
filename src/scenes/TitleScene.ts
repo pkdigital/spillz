@@ -87,17 +87,17 @@ export class TitleScene extends Phaser.Scene {
   // harmless (we guard every add.image with textures.exists). Keys match GameScene.
   preload(): void {
     this.load.on("loaderror", () => {});
-    for (const j of JUNK_KEYS) this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 72, height: 72 });
+    for (const j of JUNK_KEYS) this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 200, height: 200 });
     this.load.image("power-faucet", "assets/power/faucet.png");
-    this.load.svg("power-fist", "assets/power/fist.svg", { width: 128, height: 128 });
+    this.load.svg("power-fist", "assets/power/fist.svg", { width: 208, height: 208 });
     this.load.image("power-star", "assets/power/star.png");
     this.load.image("power-snowflake", "assets/power/snowflake.png");
     this.load.image("power-poison", "assets/power/poison.png");
     this.load.image("power-rain", "assets/power/rain.png");
     this.load.image("power-blitz", "assets/power/lightning.png");
-    this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
-    this.load.svg("rock", "assets/decor/rock.svg", { width: 128, height: 128 });
-    this.load.svg("fish-1", "assets/decor/fish-1.svg", { width: 96, height: 96 });
+    this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 280, height: 280 });
+    this.load.svg("rock", "assets/decor/rock.svg", { width: 208, height: 208 });
+    this.load.svg("fish-1", "assets/decor/fish-1.svg", { width: 160, height: 160 });
   }
 
   create(data?: TitleData): void {

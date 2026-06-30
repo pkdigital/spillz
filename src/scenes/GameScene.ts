@@ -326,28 +326,30 @@ export class GameScene extends Phaser.Scene {
   preload(): void {
     // a 404 on the optional PNG overrides below is harmless — we fall back to SVG
     this.load.on("loaderror", () => {});
+    // SVGs are rasterised at these sizes — load them big so detail (e.g. the "WIPES" text) stays
+    // crisp once the canvas is upscaled on a high-DPI phone.
     for (const j of JUNK_NAMES) {
-      this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 72, height: 72 });
+      this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 200, height: 200 });
       this.load.image(`junk-${j}-hd`, `assets/junk/${j}.png`); // drop a PNG to override
     }
     // tight-trimmed PNGs (the SVGs sat off-centre in their square viewBoxes)
     this.load.image("power-faucet", "assets/power/faucet.png");
-    this.load.svg("power-fist", "assets/power/fist.svg", { width: 128, height: 128 });
+    this.load.svg("power-fist", "assets/power/fist.svg", { width: 208, height: 208 });
     this.load.image("power-star", "assets/power/star.png");
     this.load.image("power-snowflake", "assets/power/snowflake.png");
     this.load.image("power-poison", "assets/power/poison.png");
     this.load.image("power-rain", "assets/power/rain.png");
     this.load.image("power-blitz", "assets/power/lightning.png");
-    this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 256, height: 256 });
-    this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 64, height: 64 });
-    this.load.svg("hint", "assets/decor/hint.svg", { width: 64, height: 64 });
-    this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 200, height: 200 });
-    this.load.svg("rock", "assets/decor/rock.svg", { width: 128, height: 128 });
-    this.load.svg("poo", "assets/decor/poo.svg", { width: 64, height: 64 });
+    this.load.svg("decor-toilet-svg", "assets/decor/toilet.svg", { width: 320, height: 320 });
+    this.load.svg("decor-arrow", "assets/decor/arrow-down.svg", { width: 96, height: 96 });
+    this.load.svg("hint", "assets/decor/hint.svg", { width: 96, height: 96 });
+    this.load.svg("fatberg", "assets/decor/fatberg.svg", { width: 280, height: 280 });
+    this.load.svg("rock", "assets/decor/rock.svg", { width: 208, height: 208 });
+    this.load.svg("poo", "assets/decor/poo.svg", { width: 160, height: 160 });
     for (let i = 1; i <= 5; i++) {
-      this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 96, height: 96 });
+      this.load.svg(`fish-${i}`, `assets/decor/fish-${i}.svg`, { width: 160, height: 160 });
       // a greyscale copy of the SAME species shape — a corpse should read as the same fish, drained
-      this.load.svg(`fish-${i}-dead`, `assets/decor/fish-${i}-dead.svg`, { width: 96, height: 96 });
+      this.load.svg(`fish-${i}-dead`, `assets/decor/fish-${i}-dead.svg`, { width: 160, height: 160 });
     }
     this.load.image("decor-toilet", "assets/decor/toilet.png"); // drop your PNG to override
     // optional SFX samples — drop assets/sfx/<name>.mp3 and it overrides the synth fallback
