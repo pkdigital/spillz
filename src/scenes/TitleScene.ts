@@ -52,6 +52,7 @@ export class TitleScene extends Phaser.Scene {
   private newRank = -1; // index of the freshly-added entry to highlight
 
   // initials entry state
+  private heldArrow: { slot: number; dir: number; next: number } | null = null; // tap-and-hold repeat
   private pendingScore = 0;
   private pendingLevel = 1;
   private initials = ["A", "A", "A"];
@@ -139,7 +140,7 @@ export class TitleScene extends Phaser.Scene {
     };
     mk("tagline", 11, "#00f6ff");
     mk("playLabel", 16, "#000000", 12);
-    mk("entryHead", 14, "#fff200");
+    mk("entryHead", 28, "#fff200"); // 2x — the celebratory "NEW HIGH SCORE!"
     mk("entrySub", 10, "#00f6ff");
     mk("okLabel", 14, "#000000", 12);
     mk("hint", 9, "#7a7f88");
@@ -368,6 +369,7 @@ export class TitleScene extends Phaser.Scene {
         if (a.rect.contains(p.x, p.y)) {
           this.slot = a.slot;
           this.cycleSlot(a.slot, a.dir);
+          this.heldArrow = { slot: a.slot, dir: a.dir, next: this.clock + 360 }; // tap-and-hold to repeat
           return;
         }
       }
@@ -405,6 +407,7 @@ export class TitleScene extends Phaser.Scene {
   }
 
   private confirmEntry(): void {
+    this.heldArrow = null;
     const name = this.initials.join("");
     this.scores = addScore(name, this.pendingScore, this.pendingLevel);
     this.newRank = this.scores.findIndex((h) => h.name === name && h.score === this.pendingScore);
@@ -423,6 +426,16 @@ export class TitleScene extends Phaser.Scene {
     this.bg.clear();
     this.ui.clear();
     this.arrowBtns = [];
+
+    // tap-and-hold on an initials arrow auto-repeats (clears as soon as the finger lifts)
+    if (this.heldArrow) {
+      if (this.mode !== "entry" || !this.input.activePointer.isDown) {
+        this.heldArrow = null;
+      } else if (this.clock >= this.heldArrow.next) {
+        this.cycleSlot(this.heldArrow.slot, this.heldArrow.dir);
+        this.heldArrow.next = this.clock + 110; // repeat rate after the initial pause
+      }
+    }
 
     this.drawBackground(d);
     if (this.mode === "menu") {

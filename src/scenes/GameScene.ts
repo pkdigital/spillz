@@ -290,6 +290,9 @@ export class GameScene extends Phaser.Scene {
   private banner: { lines: string[]; start: number; hold: number } | null = null;
   private bannerQueue: { lines: string[]; hold: number }[] = [];
   private bannerText!: Phaser.GameObjects.Text;
+  /** The just-replaced banner, rising + fading above the new one (notification-stack feel). */
+  private bannerOut: { lines: string[]; start: number } | null = null;
+  private bannerOutText!: Phaser.GameObjects.Text;
   private countdownLabel!: Phaser.GameObjects.Text; // small "SPILL" caption under the gauge
   private countdownNum!: Phaser.GameObjects.Text; // the gauge's centre readout (3·2·1 / segments left)
   private gaugeF = 0; // smoothed marker position (0 = SAFE, 1 = SPILL)
@@ -361,6 +364,7 @@ export class GameScene extends Phaser.Scene {
     this.model = new Game(undefined, data?.level ?? 1, data?.fishSaved ?? 0, data?.runScore ?? 0);
     this.seenHints = new Set(data?.seenHints ?? []);
     this.banner = null;
+    this.bannerOut = null;
     this.bannerQueue = [];
     this.prevStarted = false;
     this.runBeganAt = -1e9;
@@ -473,6 +477,19 @@ export class GameScene extends Phaser.Scene {
       .setDepth(Z_TEXT)
       .setVisible(false);
     this.bannerText = this.add
+      .text(GAME_WIDTH / 2, 0, "", {
+        fontFamily: ARCADE_FONT,
+        fontSize: "22px",
+        color: "#ffd24a",
+        align: "center",
+        lineSpacing: 10,
+        stroke: "#06101a",
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setDepth(Z_TEXT)
+      .setVisible(false);
+    this.bannerOutText = this.add
       .text(GAME_WIDTH / 2, 0, "", {
         fontFamily: ARCADE_FONT,
         fontSize: "22px",
@@ -2221,55 +2238,86 @@ export class GameScene extends Phaser.Scene {
    *  can play in turn. Hidden while a Start/Win/Lose card is up. */
   private renderBanner(): void {
     const playing = this.model.started && this.model.state !== "WON" && this.model.state !== "GAMEOVER";
+    const cy = HUD_H + (this.pondTop - HUD_H) * 0.3;
+    const OUT_MS = 480; // how long the outgoing banner rises + fades
+
+    // Advance the queue: the current banner ends on its hold, OR early if more are waiting — either
+    // way it's demoted to the "outgoing" slot so it rises + fades ABOVE the next one.
+    if (this.banner) {
+      const age = this.clock - this.banner.start;
+      const expired = age > this.banner.hold;
+      const crowded = this.bannerQueue.length > 0 && age > 600;
+      if (!playing || expired || crowded) {
+        if (playing) this.bannerOut = { lines: this.banner.lines, start: this.clock };
+        this.banner = null;
+      }
+    }
     if (!this.banner && this.bannerQueue.length && playing) {
       this.banner = { ...this.bannerQueue.shift()!, start: this.clock };
     }
-    const age = this.banner ? this.clock - this.banner.start : 0;
-    const cy = HUD_H + (this.pondTop - HUD_H) * 0.3;
-    if (!this.banner || !playing || age > this.banner.hold) {
-      this.banner = null;
-      // live callouts (leak alarm / spill 3·2·1) take the banner spot once any queued banner clears
-      const live = playing ? this.liveCallout() : null;
-      if (live) {
-        const throb = 1 + 0.12 * Math.sin(this.clock / 160);
-        this.bannerText
-          .setText(live.label)
-          .setColor(live.color)
-          .setPosition(GAME_WIDTH / 2, cy)
-          .setScale(live.num ? 0.85 : throb) // the number does the pulsing when there is one
-          .setAlpha(1)
-          .setVisible(true);
-        if (live.num) {
-          this.countdownNum
-            .setText(live.num)
-            .setFontSize(56)
-            .setColor(live.color)
-            .setOrigin(0.5)
-            .setScale(1 + 0.2 * Math.sin(this.clock / 150)) // grow/shrink for emphasis
-            .setAlpha(1)
-            .setPosition(GAME_WIDTH / 2, cy + 50)
-            .setVisible(true);
-        } else {
-          this.countdownNum.setVisible(false);
-        }
+
+    // the outgoing banner: rise above + fade out
+    if (this.bannerOut && playing) {
+      const t = (this.clock - this.bannerOut.start) / OUT_MS;
+      if (t >= 1) {
+        this.bannerOut = null;
+        this.bannerOutText.setVisible(false);
       } else {
-        this.bannerText.setVisible(false);
-        this.countdownNum.setVisible(false);
+        this.bannerOutText
+          .setText(this.bannerOut.lines.join("\n"))
+          .setPosition(GAME_WIDTH / 2, cy - 50 * t)
+          .setScale(1 - 0.1 * t)
+          .setAlpha(1 - t)
+          .setVisible(true);
       }
+    } else {
+      this.bannerOut = null;
+      this.bannerOutText.setVisible(false);
+    }
+
+    // the current banner (fades in, holds) OR a live callout when the queue is empty
+    if (this.banner) {
+      this.bannerText.setColor("#ffd24a");
+      this.countdownNum.setVisible(false);
+      const age = this.clock - this.banner.start;
+      const fadeIn = Math.min(1, age / 180);
+      const pop = age < 300 ? easeOutBack(Math.min(1, age / 300)) : 1;
+      this.bannerText
+        .setText(this.banner.lines.join("\n"))
+        .setPosition(GAME_WIDTH / 2, cy)
+        .setScale(pop)
+        .setAlpha(fadeIn)
+        .setVisible(true);
       return;
     }
-    this.bannerText.setColor("#ffd24a"); // queued banners use the default amber
-    this.countdownNum.setVisible(false);
-    const fadeIn = Math.min(1, age / 180);
-    const fadeOut = Math.min(1, Math.max(0, (this.banner.hold - age) / 450));
-    const alpha = Math.min(fadeIn, fadeOut);
-    const pop = age < 300 ? easeOutBack(Math.min(1, age / 300)) : 1;
-    this.bannerText
-      .setText(this.banner.lines.join("\n"))
-      .setPosition(GAME_WIDTH / 2, cy)
-      .setScale(pop)
-      .setAlpha(alpha)
-      .setVisible(true);
+    // live callouts (leak alarm / spill 3·2·1) take the banner spot once any queued banner clears
+    const live = playing ? this.liveCallout() : null;
+    if (live) {
+      const throb = 1 + 0.12 * Math.sin(this.clock / 160);
+      this.bannerText
+        .setText(live.label)
+        .setColor(live.color)
+        .setPosition(GAME_WIDTH / 2, cy)
+        .setScale(live.num ? 0.85 : throb)
+        .setAlpha(1)
+        .setVisible(true);
+      if (live.num) {
+        this.countdownNum
+          .setText(live.num)
+          .setFontSize(56)
+          .setColor(live.color)
+          .setOrigin(0.5)
+          .setScale(1 + 0.2 * Math.sin(this.clock / 150))
+          .setAlpha(1)
+          .setPosition(GAME_WIDTH / 2, cy + 50)
+          .setVisible(true);
+      } else {
+        this.countdownNum.setVisible(false);
+      }
+    } else {
+      this.bannerText.setVisible(false);
+      this.countdownNum.setVisible(false);
+    }
   }
 
   /** "Oh No. Condom!"-style banner that pops, holds, and fades when sewage hits a special tile. */
