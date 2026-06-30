@@ -2548,15 +2548,6 @@ export class GameScene extends Phaser.Scene {
     g.fillStyle(0x05070c, 0.66); // dim the whole screen so it reads as modal
     g.fillRect(0, 0, GAME_WIDTH, this.viewH);
 
-    const pw = 420;
-    const ph = Math.min(this.viewH - 24, 466);
-    const px = GAME_WIDTH / 2 - pw / 2;
-    const py = this.viewH / 2 - ph / 2;
-    g.fillStyle(0x12100e, 0.97);
-    g.fillRoundedRect(px, py, pw, ph, 18);
-    g.lineStyle(3, accent, 0.95);
-    g.strokeRoundedRect(px, py, pw, ph, 18);
-
     // this level reframed as one real spill event
     const hours = Math.max(1, Math.round(m.overflowTotal * 0.4));
     const litres = (hours * 140000).toLocaleString();
@@ -2570,18 +2561,35 @@ export class GameScene extends Phaser.Scene {
       `FISH LOST    ${m.fishDead}\n\n` +
       `SCORE    ${m.runScore}` +
       (highScore ? `\n\nNEW HIGH SCORE!` : "");
-    this.centerText.setPosition(GAME_WIDTH / 2, py + 190).setText(report);
-
-    // the gut-punch: this was ONE spill vs the real annual scale
+    // Set the text first, then size the card to fit it — no leftover gap where the tanker used to sit.
+    this.centerText.setOrigin(0.5, 0).setText(report);
     this.compareText
-      .setPosition(GAME_WIDTH / 2, py + 300)
+      .setOrigin(0.5, 0)
       .setText(COMPARISONS[(m.level - 1) % COMPARISONS.length])
       .setVisible(true);
 
     const bw = 240;
     const bh = 54;
+    const padTop = 30;
+    const gap = 22;
+    const padBottom = 22;
+    const pw = 420;
+    const contentH = padTop + this.centerText.height + gap + this.compareText.height + gap + bh + padBottom;
+    const ph = Math.min(this.viewH - 24, contentH);
+    const px = GAME_WIDTH / 2 - pw / 2;
+    const py = this.viewH / 2 - ph / 2;
+    g.fillStyle(0x12100e, 0.97);
+    g.fillRoundedRect(px, py, pw, ph, 18);
+    g.lineStyle(3, accent, 0.95);
+    g.strokeRoundedRect(px, py, pw, ph, 18);
+
+    let cy = py + padTop;
+    this.centerText.setPosition(GAME_WIDTH / 2, cy);
+    cy += this.centerText.height + gap;
+    this.compareText.setPosition(GAME_WIDTH / 2, cy); // the gut-punch: one spill vs the real annual scale
+
     const bx = GAME_WIDTH / 2 - bw / 2;
-    const by = py + ph - bh - 20;
+    const by = py + ph - bh - padBottom;
     // the throbbing neon button, shared with the title screen's PLAY
     drawFlashButton(g, this.clock, bx, by, bw, bh);
     this.endButton = { x: bx, y: by, w: bw, h: bh };
