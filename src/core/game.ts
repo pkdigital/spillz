@@ -52,6 +52,9 @@ export const CONFIG = {
   minFlowIntervalMs: 620,
   maxFlowIntervalMs: 2600,
   sourceCol: 3,
+  /** Column the on-screen next-pipe queue HUD overlays — kept clear of seeded
+   *  obstacles/powers so they're never hidden behind it (the player can still build there). */
+  hudCol: 0,
 
   // --- pond / tug-of-war: Water Quality vs £ Profit (balance 0..1 = quality) ---
   startBalance: 0.72,
@@ -417,6 +420,7 @@ export class Game {
       const clog = obstacleChance(r);
       const rock = rockChance(this.level, r);
       for (let col = 0; col < CONFIG.cols; col++) {
+        if (col === CONFIG.hudCol) continue; // keep the queue-HUD column clear of seeded content
         const c = { row: r, col };
         if (!this.grid.isEmpty(c)) continue;
         const roll = this.rng();
@@ -443,9 +447,15 @@ export class Game {
   private maybeSeedFatberg(r: number): void {
     if (this.fatbergPlaced || this.level < CONFIG.fatbergFromLevel) return;
     if (r < OBSTACLE_START_ROW + 4) return; // a few rows into the dump, never right at the top
-    // a 2x2 block whose columns avoid the source column, so a route always exists
+    // a 2x2 block whose columns avoid the source column (so a route always exists) and the
+    // queue-HUD column (so it's not hidden behind the HUD)
     const lefts = [0, 1, 4, 5].filter(
-      (c) => c + 1 < CONFIG.cols && c !== CONFIG.sourceCol && c + 1 !== CONFIG.sourceCol,
+      (c) =>
+        c + 1 < CONFIG.cols &&
+        c !== CONFIG.sourceCol &&
+        c + 1 !== CONFIG.sourceCol &&
+        c !== CONFIG.hudCol &&
+        c + 1 !== CONFIG.hudCol,
     );
     const col = lefts[Math.floor(this.rng() * lefts.length)];
     for (let dr = 0; dr < 2; dr++) {

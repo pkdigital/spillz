@@ -89,7 +89,7 @@ export class TitleScene extends Phaser.Scene {
     this.load.on("loaderror", () => {});
     for (const j of JUNK_KEYS) this.load.svg(`junk-${j}`, `assets/junk/${j}.svg`, { width: 72, height: 72 });
     this.load.image("power-faucet", "assets/power/faucet.png");
-    this.load.image("power-fist", "assets/power/fist.png");
+    this.load.svg("power-fist", "assets/power/fist.svg", { width: 128, height: 128 });
     this.load.image("power-star", "assets/power/star.png");
     this.load.image("power-snowflake", "assets/power/snowflake.png");
     this.load.image("power-poison", "assets/power/poison.png");
