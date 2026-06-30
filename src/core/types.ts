@@ -71,7 +71,7 @@ export interface QueuePiece {
 
 /** Something notable the sewage flowed through this tick (drives the on-screen toast). */
 export interface FlowEvent {
-  kind: "clog" | "power" | "explosion";
+  kind: "clog" | "power" | "explosion" | "overwrite";
   junk?: JunkType;
   power?: PowerType;
   /** Where it happened (so the scene can drop the junk from that tile into the pond). */

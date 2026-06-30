@@ -44,12 +44,23 @@ export const PLACEABLE_PIECES: PieceType[] = [
   "bend-sw",
 ];
 
-export const POWER_TYPES: PowerType[] = ["speed-up", "score", "freeze", "poison", "rain", "blitz"];
+export const POWER_TYPES: PowerType[] = [
+  "speed-up",
+  "speed-down",
+  "protest",
+  "score",
+  "freeze",
+  "poison",
+  "rain",
+  "blitz",
+];
 
-/** Relative odds a seeded board marker is each power. Faucet stays common; the hazard (poison)
- *  and the helpers are rarer treats. */
+/** Relative odds a seeded board marker is each power. Faucet (speed up/down) stays common; the
+ *  hazard (poison) and the helpers (protest heals quality) are rarer treats. */
 const POWER_WEIGHTS: [PowerType, number][] = [
-  ["speed-up", 4],
+  ["speed-up", 3],
+  ["speed-down", 2],
+  ["protest", 2],
   ["score", 2],
   ["freeze", 2],
   ["poison", 2],

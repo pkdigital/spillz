@@ -1,6 +1,4 @@
 import Phaser from "phaser";
-import lottie, { type AnimationItem } from "lottie-web/build/player/lottie_light_canvas";
-import tankerLottie from "./tanker-lottie.json";
 import factsData from "../../data/facts.json";
 import { CONFIG, Game } from "../core/game";
 import { qualifies } from "../core/highscores";
@@ -187,6 +185,7 @@ const FISH_COLORS = [0x9be15d, 0xffb347, 0x6fd3ff, 0xff8da3, 0xc792ea, 0xf6e05e]
 const PLACE_ANIM_MS = 170;
 const INTRO_MS = 1150; // board reveal after START: obstacles spin in, queue slides, hints appear
 const WIN_DRAIN_MS = 1500; // on a win, the flow eases to a stop + the pipes drain before the card
+const OVERWRITE_BUSY_MS = 1100; // re-laying a tile blocks the next placement while the smoke clears (time penalty)
 const FACTS: { fact: string; source: string }[] = factsData.facts;
 // End-screen gut-punch: the player's single spill vs the real 2024 scale (one per level, cycled).
 const COMPARISONS: string[] = [
@@ -214,10 +213,6 @@ export class GameScene extends Phaser.Scene {
   private gfxWorld!: G;
   private gfxUi!: G;
   private gfxQueue!: G; // translucent overlay layer for the queue + gauge HUD
-  private lottieAnim: AnimationItem | null = null; // the win tanker (rendered to an offscreen canvas)
-  private lottieContainer: HTMLDivElement | null = null;
-  private lottiePlaying = false;
-  private gfxTop!: G; // graphics above the UI sprites (the tanker's sewage fill)
   /** Dedicated, masked layer for the next-piece reel so symbols clip at the box rim.
    *  The mask is applied ONLY while spinning — a persistent mask does a per-frame
    *  stencil pass even when idle, which is slow on software WebGL. */
@@ -247,6 +242,8 @@ export class GameScene extends Phaser.Scene {
   private pendingRestart: { level: number; fishSaved: number; runScore: number; seenHints: string[] } | null = null;
   /** Pending return to the title screen (run ended) — deferred out of the input callback. */
   private pendingMenu: { pendingScore: number; pendingLevel: number } | null = null;
+  /** While the smoke from a re-laid tile clears, placement is blocked (the overwrite time penalty). */
+  private overwriteBusyUntil = 0;
   /** Player paused the run ("P"); the sim freezes and a RESUME overlay shows. */
   private paused = false;
   /** RESUME button hit rect while paused (null otherwise). */
@@ -257,7 +254,7 @@ export class GameScene extends Phaser.Scene {
   /** Blast debris — embers (fire) and muck chunks — flung out under gravity (screen space). */
   private blastBits: { x: number; y: number; vx: number; vy: number; r: number; color: number; born: number; life: number }[] = [];
   /** Rising smoke puffs after a blast. */
-  private smokePuffs: { x: number; y: number; vy: number; r: number; born: number; life: number }[] = [];
+  private smokePuffs: { x: number; y: number; vy: number; r: number; born: number; life: number; color: number }[] = [];
   /** Floating "+N BONUS" score pops that rise and fade (score markers). */
   private scorePops: { x: number; y: number; value: number; born: number }[] = [];
   /** Lightning strikes that zap each blitzed tile in (row/col so they track the scroll). */
@@ -373,6 +370,7 @@ export class GameScene extends Phaser.Scene {
     this.prevState = "COUNTDOWN";
     this.pendingRestart = null;
     this.pendingMenu = null;
+    this.overwriteBusyUntil = 0;
     this.paused = false;
     this.pauseButton = null;
     this.explosions = [];
@@ -401,15 +399,6 @@ export class GameScene extends Phaser.Scene {
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
     // queue/gauge overlay: above the grid + its sprites, below text, at 70% opacity
     this.gfxQueue = this.add.graphics().setDepth(Z_UI_SPRITE + 1).setAlpha(QUEUE_ALPHA);
-    this.gfxTop = this.add.graphics().setDepth(Z_UI_SPRITE + 2); // above the tanker sprite
-    this.setupTankerAnim(); // the win haul-away tanker (Lottie -> offscreen canvas -> Phaser texture)
-    this.events.once("shutdown", () => {
-      this.lottieAnim?.destroy();
-      this.lottieAnim = null;
-      this.lottieContainer?.remove();
-      this.lottieContainer = null;
-      this.lottiePlaying = false;
-    });
 
     // SCORE — overlaid at the top of the grid (the queue band is the left sidebar now)
     this.statusText = this.add
@@ -714,6 +703,8 @@ export class GameScene extends Phaser.Scene {
     }
     // No placing until the board-reveal has settled — the game proper starts after the reel.
     if (this.clock - this.runBeganAt < INTRO_MS) return;
+    // Overwrite time penalty: can't place again until the smoke from the last re-laid tile clears.
+    if (this.clock < this.overwriteBusyUntil) return;
     const coord = this.toCell(p.x, p.y);
     if (coord && this.model.placePiece(coord)) {
       this.placedAnim.set(`${coord.row},${coord.col}`, this.clock); // animate it drawing in
@@ -795,13 +786,13 @@ export class GameScene extends Phaser.Scene {
     const revealing = this.model.started && this.clock - this.runBeganAt < INTRO_MS;
     this.model.update(revealing ? 0 : simDt);
 
-    // level cleared: fanfare + green flash. The tanker then drives in and the pipes drain into it.
+    // level cleared: fanfare + green flash, then the contained sewage eases to a stop.
     if (this.model.state === "WON" && this.prevState !== "WON") {
       this.sfxWin();
       this.flashUntil = this.clock + 450;
       this.flashColor = 0x9be15d;
       this.winDrainStart = this.clock;
-      this.queueBanner(["SPILL CONTAINED!"], 1500); // the settle beat before the tanker rolls in
+      this.queueBanner(["SPILL CONTAINED!"], 1500); // the settle beat before the report card
     }
     if (this.model.state === "GAMEOVER" && this.prevState !== "GAMEOVER") {
       this.sfxLose();
@@ -829,6 +820,7 @@ export class GameScene extends Phaser.Scene {
     // (junk tumbling into the pond, the dynamite blast)
     for (const e of this.model.consumeEvents()) {
       if (e.kind === "clog") { this.spawnJunkDrop(e); this.sfxJunk(); } // wet squelch as you clear it
+      else if (e.kind === "overwrite") this.spawnSmoke(e.coord.row, e.coord.col); // re-laid tile: a puff + time penalty
       else if (e.kind === "explosion") this.spawnBlast(e.coord.row, e.coord.col);
       else if (e.kind === "power" && e.power === "score") { this.spawnScorePop(e.coord, e.value ?? 0); this.sfxPower("score"); }
       else if (e.kind === "power" && e.power === "blitz") {
@@ -1090,7 +1082,6 @@ export class GameScene extends Phaser.Scene {
 
     const u = this.gfxUi;
     u.clear();
-    this.gfxTop.clear();
     this.gfxQueue.clear();
     this.renderFreeze(u); // icy tint over the grid while the flow is paused
     this.renderRain(u); // rain pour while a rain marker is active
@@ -1391,9 +1382,30 @@ export class GameScene extends Phaser.Scene {
         r: CELL * 0.28 + Math.random() * CELL * 0.3,
         born: this.clock,
         life: 700 + Math.random() * 600,
+        color: 0x35302b, // dark muck for the dynamite blast
       });
     }
     this.cameras.main.shake(320, 0.018);
+  }
+
+  /** A puff of smoke where a tile was re-laid — and the time penalty: placement is blocked
+   *  for the duration of the smoke (the flow keeps running, so you lose that time). */
+  private spawnSmoke(row: number, col: number): void {
+    const x = this.colX(col) + CELL / 2;
+    const y = this.rowScreenY(row) + CELL / 2;
+    for (let i = 0; i < 8; i++) {
+      this.smokePuffs.push({
+        x: x + (Math.random() - 0.5) * CELL * 0.6,
+        y: y + (Math.random() - 0.5) * CELL * 0.4,
+        vy: -24 - Math.random() * 40,
+        r: CELL * 0.2 + Math.random() * CELL * 0.24,
+        born: this.clock,
+        life: OVERWRITE_BUSY_MS * (0.85 + Math.random() * 0.3), // spans the block window
+        color: 0xeef1f4, // white puff for a re-laid tile
+      });
+    }
+    this.overwriteBusyUntil = this.clock + OVERWRITE_BUSY_MS; // block the next placement until it clears
+    this.sfxJunk(); // a soft poof/squelch as the old pipe is torn out
   }
 
   private updateBlast(dtMs: number): void {
@@ -1431,7 +1443,7 @@ export class GameScene extends Phaser.Scene {
       const t = (this.clock - s.born) / s.life;
       const a = Math.min(1, t * 4) * (1 - t) * 0.45; // fade in fast, drift out
       if (a <= 0.02) continue;
-      g.fillStyle(0x35302b, a);
+      g.fillStyle(s.color, a);
       g.fillCircle(s.x, s.y, s.r * (0.6 + t * 0.9));
     }
 
@@ -2412,35 +2424,8 @@ export class GameScene extends Phaser.Scene {
 
   // ---- HUD -------------------------------------------------------------------
 
-  /** Load the Lottie tanker into an offscreen canvas and expose it as a Phaser texture so it can
-   *  be drawn in-canvas (transparent, vector-crisp) and refreshed each frame during the win.
-   *  Lottie creates + sizes its own canvas inside a hidden container (so the 1000² art is fitted
-   *  to it via preserveAspectRatio — passing a raw context does NOT scale it). */
-  private setupTankerAnim(): void {
-    this.lottieAnim?.destroy();
-    this.lottieContainer?.remove();
-    const container = document.createElement("div");
-    container.style.cssText = "position:absolute;left:-9999px;top:0;width:512px;height:512px;pointer-events:none;";
-    document.body.appendChild(container);
-    this.lottieContainer = container;
-    this.lottieAnim = lottie.loadAnimation<"canvas">({
-      container,
-      renderer: "canvas",
-      loop: true,
-      autoplay: false,
-      animationData: tankerLottie as unknown as object,
-      rendererSettings: { clearCanvas: true, preserveAspectRatio: "xMidYMid meet" },
-    });
-    this.lottiePlaying = false;
-    const lc = container.querySelector("canvas");
-    if (lc) {
-      if (this.textures.exists("tanker")) this.textures.remove("tanker");
-      this.textures.addCanvas("tanker", lc);
-    }
-  }
-
-  /** Win-settle progress 0..1 over WIN_DRAIN_MS — drives the pipes draining as the spill is hauled
-   *  away. 0 when not winning; reaches (and stays) 1 once the settle completes. */
+  /** Win-settle progress 0..1 over WIN_DRAIN_MS — the contained sewage eases to a stop.
+   *  0 when not winning; reaches (and stays) 1 once the settle completes. */
   private winDrainNow(): number {
     if (this.model.state !== "WON" || this.winDrainStart < 0) return 0;
     return Math.min(1, (this.clock - this.winDrainStart) / WIN_DRAIN_MS);
@@ -2555,10 +2540,6 @@ export class GameScene extends Phaser.Scene {
       this.endButton = null;
       this.buttonText.setVisible(false);
       this.compareText.setVisible(false);
-      if (this.lottiePlaying) {
-        this.lottieAnim?.pause();
-        this.lottiePlaying = false;
-      }
       return;
     }
     const won = m.state === "WON";
@@ -2575,19 +2556,6 @@ export class GameScene extends Phaser.Scene {
     g.fillRoundedRect(px, py, pw, ph, 18);
     g.lineStyle(3, accent, 0.95);
     g.strokeRoundedRect(px, py, pw, ph, 18);
-
-    // on a win: the tanker (the contained spill, hauled off) sits above the title
-    if (won && this.textures.exists("tanker")) {
-      if (!this.lottiePlaying) {
-        this.lottieAnim?.goToAndPlay(0, true);
-        this.lottiePlaying = true;
-      }
-      (this.textures.get("tanker") as Phaser.Textures.CanvasTexture).refresh();
-      this.useSprite("tanker", GAME_WIDTH / 2, py + 52, 96, Z_TEXT + 1);
-    } else if (this.lottiePlaying) {
-      this.lottieAnim?.pause();
-      this.lottiePlaying = false;
-    }
 
     // this level reframed as one real spill event
     const hours = Math.max(1, Math.round(m.overflowTotal * 0.4));

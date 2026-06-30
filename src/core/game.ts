@@ -497,9 +497,11 @@ export class Game {
       this.profitPounds += CONFIG.hazardClearPounds;
       this.events.push({ kind: "clog", junk: clogJunk, coord: c });
     } else if (isOverwrite) {
-      // Overwriting your OWN pipe is wasteful — shareholders profit.
+      // Overwriting your OWN pipe is wasteful — shareholders profit. It also costs time:
+      // the scene blocks the next placement while the smoke clears (the flow keeps running).
       this.profitPounds += CONFIG.overwritePounds;
       this.adjustBalance(-CONFIG.overwriteHit);
+      this.events.push({ kind: "overwrite", coord: c });
     }
 
     // Capping / replacing a leaking end takes effect NOW — pull the next tick forward so the
