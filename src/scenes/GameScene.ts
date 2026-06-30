@@ -18,14 +18,17 @@ import {
 } from "../core/types";
 
 const CELL = 80;
-const SIDEBAR_W = 80; // slim LEFT sidebar (vertical queue + gauge); the grid sits to its right
-const GRID_X = SIDEBAR_W; // grid x-offset (cols are shifted right by the sidebar)
-const HUD_H = 0; // grid starts at the top; the queue band is the left sidebar now
+const GRID_X = 0; // the grid fills the whole canvas now (no reserved sidebar)
+const HUD_H = 0; // grid starts at the top
 const POND_H = 100;
+// The queue + gauge no longer reserve a column — they OVERLAY the left of the board
+// on a translucent layer so the board reclaims the full width.
+const QUEUE_W = 72; // width of the translucent queue/gauge overlay strip
+const QUEUE_ALPHA = 0.7; // 70% opacity so the board shows through the HUD
 
 const ARCADE_FONT = "'Press Start 2P', monospace";
 
-export const GAME_WIDTH = SIDEBAR_W + CONFIG.cols * CELL;
+export const GAME_WIDTH = CONFIG.cols * CELL;
 export const GAME_HEIGHT = HUD_H + CONFIG.rows * CELL + POND_H;
 
 const COLORS = {
@@ -210,6 +213,7 @@ export class GameScene extends Phaser.Scene {
   private model!: Game;
   private gfxWorld!: G;
   private gfxUi!: G;
+  private gfxQueue!: G; // translucent overlay layer for the queue + gauge HUD
   private lottieAnim: AnimationItem | null = null; // the win tanker (rendered to an offscreen canvas)
   private lottieContainer: HTMLDivElement | null = null;
   private lottiePlaying = false;
@@ -395,6 +399,8 @@ export class GameScene extends Phaser.Scene {
 
     this.gfxWorld = this.add.graphics();
     this.gfxUi = this.add.graphics().setDepth(Z_UI);
+    // queue/gauge overlay: above the grid + its sprites, below text, at 70% opacity
+    this.gfxQueue = this.add.graphics().setDepth(Z_UI_SPRITE + 1).setAlpha(QUEUE_ALPHA);
     this.gfxTop = this.add.graphics().setDepth(Z_UI_SPRITE + 2); // above the tanker sprite
     this.setupTankerAnim(); // the win haul-away tanker (Lottie -> offscreen canvas -> Phaser texture)
     this.events.once("shutdown", () => {
@@ -1085,12 +1091,14 @@ export class GameScene extends Phaser.Scene {
     const u = this.gfxUi;
     u.clear();
     this.gfxTop.clear();
+    this.gfxQueue.clear();
     this.renderFreeze(u); // icy tint over the grid while the flow is paused
     this.renderRain(u); // rain pour while a rain marker is active
     this.renderPond(u);
     this.renderHud();
-    this.renderQueue(u); // the bottom queue band (drawn first so the gauge sits on top of it)
-    this.renderGauge(u); // the spill gauge — a semicircle on the right of the band
+    // queue + gauge overlay the board on the translucent layer (drawn queue-first so the gauge sits on top)
+    this.renderQueue(this.gfxQueue);
+    this.renderGauge(this.gfxQueue);
     this.renderDrips(u); // falling spilled sewage, on top of everything
     this.renderJunkDrops();
     this.renderToast(u);
@@ -1927,14 +1935,9 @@ export class GameScene extends Phaser.Scene {
    *  (Tetris-style), sliding up into the active slot as you place. The gauge sits at the bottom. */
   private renderQueue(g: G): void {
     const m = this.model;
+    // No solid panel — the queue tiles float over the board (the whole layer is at 70% alpha)
+    // so column 0 stays fully visible underneath.
     const bandBot = this.pondTop;
-    // the sidebar itself — a metal strip down the left of the grid
-    g.fillStyle(0x14161b, 1);
-    g.fillRect(0, 0, SIDEBAR_W, bandBot);
-    g.fillStyle(0x3a3f47, 1);
-    g.fillRect(SIDEBAR_W - 3, 0, 3, bandBot); // right rail
-    g.fillStyle(0x07080a, 1);
-    g.fillRect(0, 0, 2, bandBot); // left shadow
 
     if (m.state === "WON" || m.state === "GAMEOVER" || !m.started) return;
     const front = m.currentPiece;
@@ -1947,7 +1950,7 @@ export class GameScene extends Phaser.Scene {
 
     const tile = 56;
     const step = tile + 8;
-    const cx = SIDEBAR_W / 2;
+    const cx = QUEUE_W / 2;
     const topY = 56; // active slot, near the top (below the overlaid score)
     const n = m.queue.length;
     const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
@@ -1958,6 +1961,9 @@ export class GameScene extends Phaser.Scene {
 
     const drawTile = (py: number, qp: QueuePiece) => {
       if (py < topY - step || py > bandBot - tile / 2) return; // off the top / behind the gauge
+      // a soft dark chip so each floating tile reads against the board behind it
+      g.fillStyle(0x0c0b0a, 0.85);
+      g.fillRoundedRect(cx - tile / 2, py - tile / 2, tile, tile, 10);
       this.drawPipeGlyph(g, cx, py, PIECE_OPENINGS[qp.type], tile * 0.78);
       if (qp.dynamite) this.drawDynamiteBadge(g, cx, py, tile * 0.78);
     };
@@ -2447,8 +2453,8 @@ export class GameScene extends Phaser.Scene {
   private renderGauge(g: G): void {
     const m = this.model;
     const R = 32;
-    const gx = SIDEBAR_W / 2; // centred in the left sidebar
-    const gy = this.pondTop - 16; // near the bottom of the sidebar, arc reaching up
+    const gx = QUEUE_W / 2; // centred in the queue overlay strip
+    const gy = this.pondTop - 16; // near the bottom of the strip, arc reaching up
 
     // target needle fraction (0 = SAFE/left, 1 = SPILL/right) + the centre number
     let target = 0;
