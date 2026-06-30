@@ -32,10 +32,7 @@ interface TitleData {
 }
 
 // auto-scroll feel
-const SCROLL_SPEED = 55; // px/s downward
-const STEP_PAUSE = 1100; // dwell at each step
-const TOP_PAUSE = 1500; // dwell at the very top
-const BOTTOM_PAUSE = 2200; // dwell at the very bottom before gliding back
+const SCROLL_SPEED = 34; // px/s — a gentle, readable continuous crawl
 const RESUME_AFTER = 4000; // ms of no touch before auto-scroll takes back over
 
 export class TitleScene extends Phaser.Scene {
@@ -60,18 +57,14 @@ export class TitleScene extends Phaser.Scene {
   private initials = ["A", "A", "A"];
   private slot = 0;
 
-  // scrolling instructions panel
+  // scrolling instructions panel (seamless continuous loop — two stacked copies)
   private scrollC: Phaser.GameObjects.Container | null = null;
   private maskShape: Phaser.GameObjects.Graphics | null = null;
-  private scoreText: Phaser.GameObjects.Text | null = null;
+  private scoreTexts: Phaser.GameObjects.Text[] = [];
   private viewportTop = 0;
   private viewportH = 0;
-  private contentH = 0;
-  private maxScroll = 0;
-  private scrollY = 0;
-  private scrollTarget = 0;
-  private holdUntil = 0; // clock time to dwell until
-  private returning = false; // gliding back to the top
+  private loopH = 0; // one content copy + the gap before the next copy
+  private scrollY = 0; // continuous offset, wrapped by loopH
   private userUntil = 0; // suppress auto-scroll until this clock time
 
   // pointer / drag
@@ -192,10 +185,11 @@ export class TitleScene extends Phaser.Scene {
     this.maskShape?.destroy();
     this.scrollC = null;
     this.maskShape = null;
-    this.scoreText = null;
+    this.scoreTexts = [];
   }
 
-  /** Build the tall instructions filmstrip (icons + text + high scores) and mask it to a viewport. */
+  /** Build the instructions filmstrip — two stacked copies of centred content so the
+   *  auto-scroll loops seamlessly (never jumps) — and mask it to a viewport. */
   private buildScroll(): void {
     this.destroyScroll();
     const H = this.viewH;
@@ -209,68 +203,8 @@ export class TitleScene extends Phaser.Scene {
     this.scrollC = c;
     const g = this.add.graphics();
     c.add(g);
+    this.scoreTexts = [];
 
-    let y = 12;
-    const header = (text: string, color: string) => {
-      y += 10;
-      const t = this.add
-        .text(cx, y + 8, text, { fontFamily: ARCADE_FONT, fontSize: "14px", color, align: "center" })
-        .setOrigin(0.5, 0.5);
-      c.add(t);
-      y += 32;
-    };
-    // one instruction row: a real game image (if loaded) OR a procedural glyph, plus text
-    const item = (text: string, opts: { img?: string; proc?: ProcKind; color?: number }) => {
-      const rowH = text.includes("\n") ? 54 : 42;
-      const iconY = y + rowH / 2;
-      let placed = false;
-      if (opts.img && this.textures.exists(opts.img)) {
-        const img = this.add.image(46, iconY, opts.img);
-        img.setScale(34 / Math.max(img.width, img.height));
-        c.add(img);
-        placed = true;
-      }
-      if (!placed && opts.proc) this.drawProcIcon(g, opts.proc, 46, iconY, 30, opts.color ?? 0xffffff);
-      const t = this.add
-        .text(82, iconY, text, {
-          fontFamily: ARCADE_FONT,
-          fontSize: "10px",
-          color: "#dfe6e0",
-          align: "left",
-          lineSpacing: 6,
-        })
-        .setOrigin(0, 0.5);
-      c.add(t);
-      y += rowH;
-    };
-
-    header("HOW TO PLAY", "#fff200");
-    header("DO", "#39ff14");
-    item("LAY PIPE TO GUIDE\nTHE SEWAGE DOWN", { proc: "pipe" });
-    item("IT POURS FROM\nTHE OUTLET", { proc: "source" });
-    item("SAVE THE FISH\nIN THE POND", { img: "fish-1" });
-
-    header("POWER TILES", "#3fd0ff");
-    item("STAR - BONUS SCORE", { img: "power-star" });
-    item("FIST - PROTEST,\nHEALS THE RIVER", { img: "power-fist" });
-    item("FAUCET - SPEED\nUP OR DOWN", { img: "power-faucet" });
-    item("FREEZE - STOPS\nTHE FLOW BRIEFLY", { img: "power-snowflake" });
-    item("RAIN - HEALS BUT\nHIDES THE BOARD", { img: "power-rain" });
-    item("BLITZ - SCATTERS\nFREE PIPE PIECES", { img: "power-blitz" });
-
-    header("AVOID", "#ff2d95");
-    item("SPILLS - OPEN ENDS\nLEAK FILTH", { proc: "spill", color: 0xff5c5c });
-    item("POISON - KILLS\nA FISH INSTANTLY", { img: "power-poison" });
-    item("WET WIPES -\nCLOG THE PIPE", { img: "junk-wet-wipes" });
-    item("COTTON BUDS -\nUNFLUSHABLE", { img: "junk-cotton-buds" });
-    item("CONDOM -\nUNFLUSHABLE", { img: "junk-condom" });
-    item("SANITARY PAD -\nUNFLUSHABLE", { img: "junk-sanitary-pad" });
-    item("FATBERG - BLOCKS\nA 2x2 AREA", { img: "fatberg" });
-    item("ROCK - IMPASSABLE", { img: "rock" });
-    item("DYNAMITE - BLASTS\nROCKS & FATBERGS", { proc: "dynamite" });
-
-    y += 16;
-    header("HIGH SCORES", "#fff200");
     const rows = this.scores
       .map((h, i) => {
         const rank = String(i + 1).padStart(2, " ");
@@ -280,15 +214,89 @@ export class TitleScene extends Phaser.Scene {
         return `${rank} ${name} ${sc}  L${h.level}${mark}`;
       })
       .join("\n");
-    const st = this.add
-      .text(cx, y, rows, { fontFamily: ARCADE_FONT, fontSize: "12px", color: "#e8e2d4", align: "left", lineSpacing: 7 })
-      .setOrigin(0.5, 0);
-    c.add(st);
-    this.scoreText = st;
-    y += st.height + 18;
 
-    this.contentH = y;
-    this.maxScroll = Math.max(0, this.contentH - this.viewportH);
+    // build ONE copy of the content starting at local baseY; returns its height
+    const addContent = (baseY: number): number => {
+      let ly = 0;
+      const header = (text: string, color: string) => {
+        ly += 24;
+        const t = this.add
+          .text(cx, baseY + ly, text, { fontFamily: ARCADE_FONT, fontSize: "15px", color, align: "center" })
+          .setOrigin(0.5, 0);
+        c.add(t);
+        ly += t.height + 16;
+      };
+      // a centred row: icon (real image or procedural glyph) above centred text
+      const item = (text: string, opts: { img?: string; proc?: ProcKind; color?: number }) => {
+        ly += 8;
+        const box = 44;
+        const iconCy = baseY + ly + box / 2;
+        let placed = false;
+        if (opts.img && this.textures.exists(opts.img)) {
+          const img = this.add.image(cx, iconCy, opts.img);
+          img.setScale(box / Math.max(img.width, img.height));
+          c.add(img);
+          placed = true;
+        }
+        if (!placed && opts.proc) this.drawProcIcon(g, opts.proc, cx, iconCy, 38, opts.color ?? 0xffffff);
+        ly += box + 12;
+        const t = this.add
+          .text(cx, baseY + ly, text, {
+            fontFamily: ARCADE_FONT,
+            fontSize: "10px",
+            color: "#dfe6e0",
+            align: "center",
+            lineSpacing: 6,
+          })
+          .setOrigin(0.5, 0);
+        c.add(t);
+        ly += t.height + 28; // generous gap between rows
+      };
+
+      header("HOW TO PLAY", "#fff200");
+      header("DO", "#39ff14");
+      item("LAY PIPE TO GUIDE\nTHE SEWAGE DOWN", { proc: "pipe" });
+      item("IT POURS FROM\nTHE OUTLET", { proc: "source" });
+      item("SAVE THE FISH\nIN THE POND", { img: "fish-1" });
+
+      header("POWER TILES", "#3fd0ff");
+      item("STAR\nBONUS SCORE", { img: "power-star" });
+      item("FIST - PROTEST,\nHEALS THE RIVER", { img: "power-fist" });
+      item("TAP\nSPEED UP OR DOWN", { img: "power-faucet" });
+      item("FREEZE\nSTOPS THE FLOW", { img: "power-snowflake" });
+      item("RAIN - HEALS BUT\nHIDES THE BOARD", { img: "power-rain" });
+      item("BLITZ - SCATTERS\nFREE PIPE PIECES", { img: "power-blitz" });
+
+      header("AVOID", "#ff2d95");
+      item("SPILLS - OPEN ENDS\nLEAK FILTH", { proc: "spill", color: 0xff5c5c });
+      item("POISON\nKILLS A FISH", { img: "power-poison" });
+      item("WET WIPES\nCLOG THE PIPE", { img: "junk-wet-wipes" });
+      item("COTTON BUDS\nUNFLUSHABLE", { img: "junk-cotton-buds" });
+      item("CONDOM\nUNFLUSHABLE", { img: "junk-condom" });
+      item("SANITARY PAD\nUNFLUSHABLE", { img: "junk-sanitary-pad" });
+      item("FATBERG\nCLEAR WITH DYNAMITE", { img: "fatberg" });
+      item("ROCK - IMPASSABLE", { img: "rock" });
+      item("DYNAMITE - BLASTS\nROCKS & FATBERGS", { proc: "dynamite" });
+
+      header("HIGH SCORES", "#fff200");
+      const st = this.add
+        .text(cx, baseY + ly, rows, {
+          fontFamily: ARCADE_FONT,
+          fontSize: "12px",
+          color: "#e8e2d4",
+          align: "left",
+          lineSpacing: 7,
+        })
+        .setOrigin(0.5, 0);
+      c.add(st);
+      this.scoreTexts.push(st);
+      ly += st.height + 40;
+      return ly;
+    };
+
+    const h0 = addContent(0);
+    this.loopH = h0; // the gap between copies IS the trailing spacing baked into h0
+    addContent(h0); // second copy, one loop-length below — makes the wrap seamless
 
     // geometry mask clips the container to the viewport band
     const shape = this.make.graphics();
@@ -297,56 +305,16 @@ export class TitleScene extends Phaser.Scene {
     this.maskShape = shape;
     c.setMask(shape.createGeometryMask());
 
-    // start the auto-scroll cycle at the top
     this.scrollY = 0;
-    this.returning = false;
-    this.scrollTarget = Math.min(this.maxScroll, this.stepSize());
-    this.holdUntil = this.clock + TOP_PAUSE;
     this.userUntil = 0;
   }
 
-  private stepSize(): number {
-    return Math.max(80, this.viewportH * 0.5);
-  }
-
+  /** Continuous one-direction loop — content slides up forever and wraps seamlessly. */
   private updateScroll(dMs: number): void {
-    if (!this.scrollC) return;
+    if (!this.scrollC || this.loopH <= 0) return;
     const auto = this.clock >= this.userUntil && !this.dragging;
-    if (auto && this.maxScroll > 0) {
-      if (this.clock >= this.holdUntil) {
-        if (this.returning) {
-          this.scrollY += (0 - this.scrollY) * Math.min(1, dMs * 0.005);
-          if (this.scrollY <= 0.5) {
-            this.scrollY = 0;
-            this.returning = false;
-            this.scrollTarget = Math.min(this.maxScroll, this.stepSize());
-            this.holdUntil = this.clock + TOP_PAUSE;
-          }
-        } else {
-          // resuming after a manual scroll past the old target — re-aim downward
-          if (this.scrollTarget <= this.scrollY + 0.5) {
-            if (this.scrollY >= this.maxScroll - 0.5) {
-              this.returning = true;
-              this.holdUntil = this.clock + BOTTOM_PAUSE;
-            } else {
-              this.scrollTarget = Math.min(this.maxScroll, this.scrollY + this.stepSize());
-            }
-          }
-          this.scrollY = Math.min(this.scrollTarget, this.scrollY + (SCROLL_SPEED * dMs) / 1000);
-          if (this.scrollY >= this.scrollTarget - 0.5) {
-            this.scrollY = this.scrollTarget;
-            if (this.scrollTarget >= this.maxScroll) {
-              this.returning = true;
-              this.holdUntil = this.clock + BOTTOM_PAUSE;
-            } else {
-              this.holdUntil = this.clock + STEP_PAUSE;
-              this.scrollTarget = Math.min(this.maxScroll, this.scrollTarget + this.stepSize());
-            }
-          }
-        }
-      }
-    }
-    this.scrollY = Phaser.Math.Clamp(this.scrollY, 0, this.maxScroll);
+    if (auto) this.scrollY += (SCROLL_SPEED * dMs) / 1000;
+    this.scrollY = ((this.scrollY % this.loopH) + this.loopH) % this.loopH;
     this.scrollC.y = this.viewportTop - this.scrollY;
   }
 
@@ -357,8 +325,8 @@ export class TitleScene extends Phaser.Scene {
     kb.on("keydown", (e: KeyboardEvent) => {
       if (this.mode === "menu") {
         if (e.key === "Enter" || e.key === " ") this.startGame();
-        else if (e.key === "ArrowDown") this.nudgeScroll(this.stepSize() * 0.5);
-        else if (e.key === "ArrowUp") this.nudgeScroll(-this.stepSize() * 0.5);
+        else if (e.key === "ArrowDown") this.nudgeScroll(this.viewportH * 0.4);
+        else if (e.key === "ArrowUp") this.nudgeScroll(-this.viewportH * 0.4);
         return;
       }
       // entry mode
@@ -380,7 +348,7 @@ export class TitleScene extends Phaser.Scene {
   }
 
   private nudgeScroll(dy: number): void {
-    this.scrollY = Phaser.Math.Clamp(this.scrollY + dy, 0, this.maxScroll);
+    this.scrollY += dy; // wrapped by updateScroll
     this.userUntil = this.clock + RESUME_AFTER;
   }
 
@@ -422,7 +390,7 @@ export class TitleScene extends Phaser.Scene {
       this.dragging = this.dragStartY >= this.viewportTop && this.dragStartY <= this.viewportTop + this.viewportH;
     }
     if (this.dragging) {
-      this.scrollY = Phaser.Math.Clamp(this.dragStartScroll - dy, 0, this.maxScroll);
+      this.scrollY = this.dragStartScroll - dy; // wrapped by updateScroll
       this.userUntil = this.clock + RESUME_AFTER;
     }
   }
@@ -619,10 +587,9 @@ export class TitleScene extends Phaser.Scene {
     });
     this.show("tagline", cx, ty + 52, "STOP THE SEWAGE - SAVE THE FISH");
 
-    // flash the freshly-set high-score row
-    if (this.scoreText) {
-      this.scoreText.setColor(this.newRank >= 0 && Math.floor(this.clock / 250) % 2 ? "#fff200" : "#e8e2d4");
-    }
+    // flash the freshly-set high-score row (both stacked copies)
+    const flash = this.newRank >= 0 && Math.floor(this.clock / 250) % 2 ? "#fff200" : "#e8e2d4";
+    for (const st of this.scoreTexts) st.setColor(flash);
 
     // PLAY button (bottom-anchored, throbbing)
     const bw = 240;
