@@ -300,6 +300,7 @@ export class GameScene extends Phaser.Scene {
   private devPowerIdx = 0; // dev "P" key cycles through the power types
   // --- juice / SFX state ---
   private prevContained = 0; // for the per-segment flow blip
+  private lastFloodAt = -9999; // clock when the flood last advanced (gates the STOPPING countdown)
   private prevLeaking = false; // for leak-start / cap sounds
   private lastSploshAt = 0; // throttle the river-splash sound
   private flashUntil = -1; // full-screen colour flash (surge / win)
@@ -387,6 +388,7 @@ export class GameScene extends Phaser.Scene {
     this.scorePops = [];
     this.blitzStrikes = [];
     this.prevContained = 0;
+    this.lastFloodAt = -9999;
     this.prevLeaking = false;
     this.lastSploshAt = 0;
     this.flashUntil = -1;
@@ -650,7 +652,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ---- named game SFX (sample if provided, else synthesized) ----
-  private sfxPlace(): void { this.playSfx("place", () => { this.noise(55, 0.025, 1400); this.tone(150, 80, "sine", 0.022, 90); }, 0.14); }
+  private sfxPlace(): void { this.playSfx("place", () => { this.noise(55, 0.012, 1400); this.tone(150, 70, "sine", 0.012, 90); }, 0.05); }
   private sfxFlow(pct: number): void { this.playSfx("flow", () => this.tone(170 + pct * 160, 55, "sine", 0.028, 230 + pct * 160), 0.35); }
   private sfxLeak(): void { this.playSfx("leak", () => { this.tone(440, 300, "sawtooth", 0.05, 170); this.tone(300, 300, "square", 0.03, 150, 50); }); }
   private sfxCap(): void { this.playSfx("cap", () => this.tone(260, 130, "square", 0.05, 540)); }
@@ -821,7 +823,7 @@ export class GameScene extends Phaser.Scene {
     // --- juice: flow blip, leak alarm / cap, and the spill SURGE -> EASE phase callouts ---
     const m = this.model;
     if (m.started && m.state === "FLOWING") {
-      if (m.overflowContained > this.prevContained) this.sfxFlow(m.overflowPct / 100);
+      if (m.overflowContained > this.prevContained) { this.sfxFlow(m.overflowPct / 100); this.lastFloodAt = this.clock; }
       if (m.leaking && !this.prevLeaking) { this.sfxLeak(); this.cameras.main.shake(180, 0.01); }
       if (!m.leaking && this.prevLeaking) this.sfxCap();
     }
@@ -2207,7 +2209,10 @@ export class GameScene extends Phaser.Scene {
     }
     if (m.state === "FLOWING") {
       const rem = m.overflowTotal - m.overflowContained;
-      if (rem >= 1 && rem <= 3) return { label: "SPILL STOPPING IN", num: `${rem}`, color: "#ffd24a" };
+      // only while the flood is actually advancing — if it stalls (open end / dead end) the count
+      // would otherwise sit stuck and falsely promise completion; the leak alarm / board take over
+      const advancing = this.clock - this.lastFloodAt < Math.max(2600, this.model.ringFlowMs * 1.8);
+      if (rem >= 1 && rem <= 3 && advancing) return { label: "SPILL STOPPING IN", num: `${rem}`, color: "#ffd24a" };
     }
     return null;
   }
