@@ -16,14 +16,14 @@ import {
 } from "../core/types";
 
 const CELL = 80;
-const HUD_H = 0; // no top bar — level + next-pipe show as overlays
-const QUEUE_H = 66; // dedicated horizontal queue band between the grid and the river
-
-const ARCADE_FONT = "'Press Start 2P', monospace";
+const QUEUE_H = 66; // dedicated horizontal queue/HUD band — now at the TOP, above the grid
+const HUD_H = QUEUE_H; // the grid starts below the top band
 const POND_H = 100;
 
+const ARCADE_FONT = "'Press Start 2P', monospace";
+
 export const GAME_WIDTH = CONFIG.cols * CELL;
-export const GAME_HEIGHT = HUD_H + CONFIG.rows * CELL + QUEUE_H + POND_H;
+export const GAME_HEIGHT = HUD_H + CONFIG.rows * CELL + POND_H;
 
 const COLORS = {
   grassBase: 0x2f4a1c, // surface (around the toilet + first pipe)
@@ -395,7 +395,7 @@ export class GameScene extends Phaser.Scene {
 
     // level indicator — a top-right overlay (no black HUD box anymore)
     this.statusText = this.add
-      .text(10, 6, "", {
+      .text(12, QUEUE_H / 2, "", {
         fontFamily: ARCADE_FONT,
         fontSize: "13px",
         color: COLORS.text,
@@ -403,7 +403,7 @@ export class GameScene extends Phaser.Scene {
         stroke: "#06101a",
         strokeThickness: 4,
       })
-      .setOrigin(0, 0)
+      .setOrigin(0, 0.5) // left, vertically centred in the top band
       .setDepth(Z_TEXT);
     this.centerText = this.add
       .text(GAME_WIDTH / 2, (CONFIG.rows * CELL) / 2, "", {
@@ -669,10 +669,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private toCell(x: number, y: number): Coord | null {
-    const gridY = y - HUD_H;
-    if (gridY < 0 || gridY > this.gridBottom) return null; // taps in the queue band aren't grid cells
+    if (y < HUD_H || y > this.gridBottom) return null; // taps in the top band / pond aren't grid cells
     const col = Math.floor(x / CELL);
-    const row = Math.floor((gridY + this.scrollPx) / CELL);
+    const row = Math.floor((y - HUD_H + this.scrollPx) / CELL);
     const coord = { row, col };
     return this.model.grid.inBounds(coord) ? coord : null;
   }
@@ -689,13 +688,13 @@ export class GameScene extends Phaser.Scene {
   private get pondTop(): number {
     return this.viewH - POND_H;
   }
-  /** Bottom of the scrolling grid — the queue band sits between here and the pond. */
+  /** Bottom of the scrolling grid (the river begins here; the queue band is up top). */
   private get gridBottom(): number {
-    return this.pondTop - QUEUE_H;
+    return this.pondTop;
   }
-  /** Number of grid rows that fit in the play area above the queue band + pond. */
+  /** Number of grid rows that fit between the top band and the pond. */
   private get visRows(): number {
-    return Math.max(1, Math.floor(this.gridBottom / CELL));
+    return Math.max(1, Math.floor((this.gridBottom - HUD_H) / CELL));
   }
 
   update(_time: number, deltaMs: number): void {
@@ -873,12 +872,14 @@ export class GameScene extends Phaser.Scene {
     // While the player is peeking (drag-to-scroll), leave the camera where they put
     // it; otherwise deadzone-follow the latest placement and drift back smoothly.
     if (this.clock >= this.manualScrollUntil) {
-      const margin = FOLLOW_BOTTOM_MARGIN;
       const focusViewRow = this.model.buildRow - this.scrollPx / CELL;
-      if (focusViewRow > this.visRows - margin) {
-        this.scrollTargetPx = (this.model.buildRow - (this.visRows - margin)) * CELL;
-      } else if (focusViewRow < margin) {
-        this.scrollTargetPx = (this.model.buildRow - margin) * CELL;
+      // keep the build front in the UPPER portion, near the top queue band (less eye travel),
+      // while still showing empty rows below to build into.
+      const lowBound = Math.max(FOLLOW_BOTTOM_MARGIN, Math.round(this.visRows * 0.45));
+      if (focusViewRow > lowBound) {
+        this.scrollTargetPx = (this.model.buildRow - lowBound) * CELL;
+      } else if (focusViewRow < FOLLOW_BOTTOM_MARGIN) {
+        this.scrollTargetPx = (this.model.buildRow - FOLLOW_BOTTOM_MARGIN) * CELL;
       }
       this.scrollTargetPx = Math.max(0, this.scrollTargetPx);
       const k = Math.min(1, deltaMs / SCROLL_SMOOTH_MS);
@@ -1855,13 +1856,13 @@ export class GameScene extends Phaser.Scene {
     g.fillTriangle(x + r, y, x, y - w, x, y + w);
   }
 
-  /** The dedicated horizontal QUEUE BAND between the grid and the river: the current piece (left,
-   *  with its roulette) then the upcoming pieces in a row — reserved space, never over the build. */
+  /** The dedicated horizontal HUD BAND at the TOP: SCORE (left), the queue (current piece on the
+   *  right of its packed group), then the spill gauge (far right). Reserved space, above the grid. */
   private renderQueue(g: G): void {
     const m = this.model;
-    const bandTop = this.gridBottom;
+    const bandTop = 0;
     const cy = bandTop + QUEUE_H / 2;
-    // the band itself — a metal strip dividing the grid from the river
+    // the band itself — a metal strip above the grid
     g.fillStyle(0x14161b, 1);
     g.fillRect(0, bandTop, GAME_WIDTH, QUEUE_H);
     g.fillStyle(0x3a3f47, 1);
@@ -1882,7 +1883,7 @@ export class GameScene extends Phaser.Scene {
     const step = tile + 6; // packed tightly together, not spread across the width
     const gaugeLeft = GAME_WIDTH - 80; // the gauge sits on the right, clear of the queue
     const n = m.queue.length;
-    const firstX = 14 + tile / 2; // leftmost slot (furthest-future piece)
+    const firstX = 150 + tile / 2; // start after the SCORE readout on the left
     const lastX = firstX + (n - 1) * step; // the CURRENT piece's slot (right end of the packed group)
     const e = Math.min(1, (this.clock - this.rouletteStart) / 170);
     const ee = 1 - Math.pow(1 - e, 3); // ease-out
@@ -2381,8 +2382,8 @@ export class GameScene extends Phaser.Scene {
   private renderGauge(g: G): void {
     const m = this.model;
     const R = 34;
-    const gx = GAME_WIDTH - R - 12; // pivot: right side of the queue band
-    const gy = this.pondTop - 14; // roughly centred in the band, arc reaching up
+    const gx = GAME_WIDTH - R - 12; // pivot: right side of the top band
+    const gy = QUEUE_H - 8; // flat side near the band bottom, arc reaching up
 
     // target needle fraction (0 = SAFE/left, 1 = SPILL/right) + the centre number
     let target = 0;
